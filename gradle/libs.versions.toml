@@ -43,7 +43,7 @@ googleid = "1.1.1"
 re2j = "1.8"
 jqwik = "1.9.2"
 jazzerJunit = "0.24.0"
-junitJupiter = "5.11.4"
+junitJupiter = "6.1.3"
 junitPlatform = "1.11.4"
 
 
