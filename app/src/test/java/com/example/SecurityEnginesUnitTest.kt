@@ -6,6 +6,7 @@ import com.example.data.local.RuleAction
 import com.example.data.local.RuleType
 import com.example.engine.bluetooth.BtSnoopParser
 import com.example.engine.bluetooth.HciPacketLayer
+import com.example.engine.network.AppLabelResolver
 import com.example.engine.network.FirewallRuleEngine
 import com.example.engine.network.IdsEngine
 import com.example.engine.network.PacketParser
@@ -229,5 +230,15 @@ class SecurityEnginesUnitTest {
         } finally {
             tempFile.delete()
         }
+    }
+
+    @Test
+    fun appLabelResolverFormatsKnownAndUnknownPackagesWithoutApkAssets() {
+        assertEquals("Chrome", AppLabelResolver.resolveFromPackageName("com.android.chrome"))
+        assertEquals("Gmail", AppLabelResolver.resolveFromPackageName("com.google.android.gm"))
+        assertEquals("YouTube Music", AppLabelResolver.resolveFromPackageName("com.google.android.apps.youtube.music"))
+        assertEquals("Signal", AppLabelResolver.resolveFromPackageName("org.thoughtcrime.securesms.signal"))
+        assertEquals("Wireguard", AppLabelResolver.resolveFromPackageName("com.wireguard.android"))
+        assertEquals("Net Guard", AppLabelResolver.resolveFromPackageName("com.example.netGuard"))
     }
 }

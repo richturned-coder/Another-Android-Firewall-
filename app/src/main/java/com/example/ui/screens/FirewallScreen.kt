@@ -119,6 +119,11 @@ fun FirewallScreen(
     }
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    LaunchedEffect(selectedTab) {
+        if (selectedTab == 1) {
+            viewModel.ensureInstalledAppsLoaded()
+        }
+    }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var selectedPacket by remember { mutableStateOf<LivePacketEvent?>(null) }
     var showAddRuleDialog by remember { mutableStateOf(false) }

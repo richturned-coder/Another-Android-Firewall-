@@ -17,6 +17,7 @@ import com.example.FirewallApplication
 import com.example.MainActivity
 import com.example.R
 import com.example.data.local.CaptureSessionEntity
+import com.example.engine.network.AppLabelResolver
 import com.example.engine.network.IdsConfig
 import com.example.engine.network.PacketParser
 import com.example.engine.network.ParsedPacket
@@ -392,10 +393,9 @@ class FirewallVpnService : VpnService() {
                     val pkgs = runCatching { packageManager.getPackagesForUid(uid) }.getOrNull()
                     val pkg = pkgs?.firstOrNull()
                     if (pkg != null) {
-                        runCatching {
-                            val ai = packageManager.getApplicationInfo(pkg, 0)
-                            packageManager.getApplicationLabel(ai).toString()
-                        }.getOrDefault(pkg)
+                        val ai = runCatching { packageManager.getApplicationInfo(pkg, 0) }.getOrNull()
+                        AppLabelResolver.resolve(null, ai)
+                            .takeIf { ai != null } ?: AppLabelResolver.resolveFromPackageName(pkg)
                     } else {
                         "UID $uid"
                     }

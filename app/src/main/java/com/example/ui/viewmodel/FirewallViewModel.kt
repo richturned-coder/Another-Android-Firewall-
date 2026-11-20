@@ -13,6 +13,7 @@ import com.example.data.local.CaptureSessionEntity
 import com.example.data.local.FirewallRuleEntity
 import com.example.data.local.RuleAction
 import com.example.data.local.RuleType
+import com.example.engine.network.AppLabelResolver
 import com.example.engine.network.PcapngStats
 import com.example.vpn.FirewallVpnService
 import com.example.vpn.LivePacketEvent
@@ -61,8 +62,13 @@ class FirewallViewModel(
     private val _toastMessage = MutableStateFlow<String?>(null)
     val toastMessage: StateFlow<String?> = _toastMessage.asStateFlow()
 
-    init {
-        refreshInstalledApps()
+    @Volatile
+    private var appsLoaded = false
+
+    fun ensureInstalledAppsLoaded() {
+        if (!appsLoaded) {
+            refreshInstalledApps()
+        }
     }
 
     fun consumeToast() {
@@ -70,6 +76,7 @@ class FirewallViewModel(
     }
 
     fun refreshInstalledApps() {
+        appsLoaded = true
         viewModelScope.launch(Dispatchers.IO) {
             val pm = getApplication<Application>().packageManager
             val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
@@ -87,8 +94,7 @@ class FirewallViewModel(
                 if (ai.packageName == selfPkg) continue
                 val uid = ai.uid
                 if (!byUid.containsKey(uid)) {
-                    val label = runCatching { pm.getApplicationLabel(ai).toString() }
-                        .getOrDefault(ai.packageName)
+                    val label = AppLabelResolver.resolve(ri, ai)
                     val isSys = (ai.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
                     byUid[uid] = InstalledAppEntry(
                         uid = uid,
