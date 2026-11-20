@@ -19,11 +19,19 @@ class BouncyCastleNameConstraintsRegressionTest {
     fun bouncyCastleProviderIsPatchedAgainstCve20268763() {
         val providerClass = Class.forName("org.bouncycastle.jce.provider.BouncyCastleProvider")
         val provider = providerClass.getDeclaredConstructor().newInstance() as Provider
-        val versionParts = provider.versionStr.split(".").mapNotNull { it.toIntOrNull() }
+        val infoMatch = Regex("""v(\d+)\.(\d+)""").find(provider.info.orEmpty())
+        val isPatched =
+            if (infoMatch != null) {
+                val major = infoMatch.groupValues[1].toInt()
+                val minor = infoMatch.groupValues[2].toInt()
+                major > 1 || (major == 1 && minor >= 85)
+            } else {
+                @Suppress("DEPRECATION")
+                provider.version >= 1.85
+            }
         assertTrue(
-            "Expected Bouncy Castle >= 1.85 to remediate CVE-2026-8763, found ${provider.versionStr}",
-            versionParts.size >= 2 &&
-                (versionParts[0] > 1 || (versionParts[0] == 1 && versionParts[1] >= 85))
+            "Expected Bouncy Castle >= 1.85 to remediate CVE-2026-8763, found ${provider.info}",
+            isPatched
         )
     }
 
