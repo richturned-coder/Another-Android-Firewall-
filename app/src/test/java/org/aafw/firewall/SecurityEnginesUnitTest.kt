@@ -268,7 +268,7 @@ class SecurityEnginesUnitTest {
         assertTrue(engine.evaluate(validPacket, 10123).allowed)
 
         // ...but malformed packets must STILL fail closed
-        val malformedPacket = validPacket.copy(isMalformed = true, malformedReason = "truncated header")
+        val malformedPacket = validPacket.copy(isMalformed = true)
         val malformedVerdict = engine.evaluate(malformedPacket, 10123)
         assertFalse(malformedVerdict.allowed)
         assertTrue(malformedVerdict.reason.contains("Malformed", ignoreCase = true))
