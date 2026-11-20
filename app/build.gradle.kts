@@ -164,6 +164,25 @@ dependencies {
   // "ksp"(libs.moshi.kotlin.codegen)
 }
 
+// Enforce patched Bouncy Castle across all :app configurations (including AGP's internal UTP and
+// lint configurations, which transitively pull 1.79 via com.android.tools:sdk-common:32.1.1, and
+// Robolectric's test runtime classpath). Fixes CVE-2026-8763 (GHSA-9pwp-9qqc-pr26) and keeps all
+// jdk18on modules aligned.
+val bouncyCastleVersion = libs.versions.bouncycastle.get()
+configurations.configureEach {
+  resolutionStrategy.eachDependency {
+    if (
+      requested.group == "org.bouncycastle" &&
+        (requested.name.endsWith("-jdk18on") || requested.name == "bc-jdk18on-bom")
+    ) {
+      useVersion(bouncyCastleVersion)
+      because(
+        "Remediate CVE-2026-8763 (GHSA-9pwp-9qqc-pr26) and keep Bouncy Castle jdk18on modules aligned"
+      )
+    }
+  }
+}
+
 // Normalize archive timestamps and file ordering for reproducible builds
 tasks.withType<AbstractArchiveTask>().configureEach {
   isPreserveFileTimestamps = false
