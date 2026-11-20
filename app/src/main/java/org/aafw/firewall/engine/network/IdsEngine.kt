@@ -1,11 +1,11 @@
 package org.aafw.firewall.engine.network
 
+import com.google.re2j.Pattern
 import org.aafw.firewall.data.local.AlertCategory
 import org.aafw.firewall.data.local.AlertSeverity
 import org.aafw.firewall.data.local.IdsAlertEntity
 import java.net.URLDecoder
 import java.util.ArrayDeque
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.ln
 
@@ -22,11 +22,11 @@ private data class DpiSignature(
     val category: AlertCategory,
     val severity: AlertSeverity,
     val title: String,
-    val confirmRegex: Regex
+    val confirmPattern: Pattern
 )
 
 /**
- * Compact Aho-Corasick multi-pattern automaton for fast single-pass HTTP DPI scanning.
+ * Compact Aho-Corasick multi-pattern automaton for fast single-pass O(n) HTTP DPI pre-filtering.
  */
 private class AhoCorasickMatcher(signatures: List<DpiSignature>) {
     private class Node {
@@ -93,17 +93,40 @@ private class AhoCorasickMatcher(signatures: List<DpiSignature>) {
     }
 }
 
-private class SlidingWindowStats {
+private class SlidingWindowStats(var lastSeenAt: Long) {
     val portTimestamps = ArrayDeque<Pair<Long, Int>>()
     val malformedTimestamps = ArrayDeque<Long>()
     val httpErrorTimestamps = ArrayDeque<Long>()
     var lastAlertedAt: Long = 0L
 }
 
+/**
+ * Hardened inline IDS engine:
+ * - Linear-time RE2J ([com.google.re2j.Pattern]) + Aho-Corasick matching (zero ReDoS backtracking)
+ * - Capped HTTP inspection depth ([MAX_HTTP_INSPECT_BYTES] = 2048 bytes)
+ * - Fixed-capacity LRU flow state table ([MAX_TRACKED_FLOWS] = 4,096) with deterministic TTL eviction
+ * - Consumes normalized [ParsedPacket] exclusively to eliminate parser differentials
+ */
 class IdsEngine {
+    companion object {
+        const val MAX_TRACKED_FLOWS = 4_096
+        const val MAX_HTTP_INSPECT_BYTES = 2_048
+        const val MAX_WINDOW_EVENTS = 64
+        private const val FLOW_TTL_MS = 60_000L
+        private const val BEHAVIOR_WINDOW_MS = 10_000L
+        private const val ALERT_COOLDOWN_MS = 15_000L
+    }
+
     private val configRef = AtomicReference(IdsConfig())
     private val threatDomainsRef = AtomicReference<Set<String>>(emptySet())
-    private val behaviorByKey = ConcurrentHashMap<String, SlidingWindowStats>()
+    private val flowTableLock = Any()
+    private var lastEvictionCheckMs = 0L
+
+    private val behaviorByKey = object : LinkedHashMap<String, SlidingWindowStats>(256, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, SlidingWindowStats>?): Boolean {
+            return size > MAX_TRACKED_FLOWS
+        }
+    }
 
     private val highValueBrands = listOf(
         "paypal", "google", "microsoft", "apple", "amazon", "chase", "wellsfargo", "coinbase", "binance", "github"
@@ -111,79 +134,79 @@ class IdsEngine {
     private val suspiciousTlds = setOf("xyz", "top", "icu", "click", "gq", "tk", "ml", "cf", "pw", "zip")
 
     private val dpiSignatures = listOf(
-        // SQL Injection (OWASP CRS 942xxx inspired)
+        // SQL Injection (OWASP CRS 942xxx inspired, RE2J linear-time DFA/NFA)
         DpiSignature(
             "CRS-942100", "union select", AlertCategory.SQL_INJECTION, AlertSeverity.CRITICAL,
             "SQL Injection: UNION SELECT Payload",
-            Regex("""(?i)union\s+(all\s+)?select\b""")
+            Pattern.compile("""(?i)union\s+(all\s+)?select\b""")
         ),
         DpiSignature(
             "CRS-942110", "information_schema", AlertCategory.SQL_INJECTION, AlertSeverity.CRITICAL,
             "SQL Injection: Schema Enumeration",
-            Regex("""(?i)information_schema\.(tables|columns|schemata)""")
+            Pattern.compile("""(?i)information_schema\.(tables|columns|schemata)""")
         ),
         DpiSignature(
             "CRS-942120", "or 1=1", AlertCategory.SQL_INJECTION, AlertSeverity.HIGH,
             "SQL Injection: Boolean Tautology",
-            Regex("""(?i)('|\s|%27)or\s+1\s*=\s*1""")
+            Pattern.compile("""(?i)('|\s|%27)or\s+1\s*=\s*1""")
         ),
         DpiSignature(
             "CRS-942130", "waitfor delay", AlertCategory.SQL_INJECTION, AlertSeverity.CRITICAL,
             "SQL Injection: Time-Based Blind Probe",
-            Regex("""(?i)(waitfor\s+delay|sleep\s*\(\s*\d+\s*\)|pg_sleep\s*\()""")
+            Pattern.compile("""(?i)(waitfor\s+delay|sleep\s*\(\s*\d+\s*\)|pg_sleep\s*\()""")
         ),
         DpiSignature(
             "CRS-942135", "sleep(", AlertCategory.SQL_INJECTION, AlertSeverity.HIGH,
             "SQL Injection: SLEEP() Timing Probe",
-            Regex("""(?i)\bsleep\s*\(\s*\d+\s*\)""")
+            Pattern.compile("""(?i)\bsleep\s*\(\s*\d+\s*\)""")
         ),
         // XSS (OWASP CRS 941xxx inspired)
         DpiSignature(
             "CRS-941100", "<script", AlertCategory.XSS_INJECTION, AlertSeverity.HIGH,
             "Cross-Site Scripting: <script> Tag",
-            Regex("""(?i)<\s*script[\s>]""")
+            Pattern.compile("""(?i)<\s*script[\s>]""")
         ),
         DpiSignature(
             "CRS-941110", "onerror=", AlertCategory.XSS_INJECTION, AlertSeverity.HIGH,
             "Cross-Site Scripting: Event Handler Injection",
-            Regex("""(?i)\bon(error|load|mouseover|focus)\s*=""")
+            Pattern.compile("""(?i)\bon(error|load|mouseover|focus)\s*=""")
         ),
         DpiSignature(
             "CRS-941120", "javascript:", AlertCategory.XSS_INJECTION, AlertSeverity.MEDIUM,
             "Cross-Site Scripting: javascript: URI",
-            Regex("""(?i)javascript\s*:""")
+            Pattern.compile("""(?i)javascript\s*:""")
         ),
         DpiSignature(
             "CRS-941130", "document.cookie", AlertCategory.XSS_INJECTION, AlertSeverity.HIGH,
             "Cross-Site Scripting: Cookie Exfiltration Attempt",
-            Regex("""(?i)document\s*\.\s*cookie""")
+            Pattern.compile("""(?i)document\s*\.\s*cookie""")
         ),
         // Command Injection (OWASP CRS 932xxx inspired)
         DpiSignature(
             "CRS-932100", "/etc/passwd", AlertCategory.COMMAND_INJECTION, AlertSeverity.CRITICAL,
             "OS Command / File Injection: /etc/passwd Access",
-            Regex("""(?i)(;\s*cat|\|\s*cat|\.\./).*?/etc/passwd""")
+            Pattern.compile("""(?i)(;\s*cat|\|\s*cat|\.\./)[^\n]{0,128}/etc/passwd""")
         ),
         DpiSignature(
             "CRS-932110", "; cat ", AlertCategory.COMMAND_INJECTION, AlertSeverity.CRITICAL,
             "OS Command Injection: Chained Shell Command",
-            Regex("""(?i)(;|\||&&)\s*(cat|id|whoami|uname|wget|curl|nc|bash|sh)\b""")
+            Pattern.compile("""(?i)(;|\||&&)\s*(cat|id|whoami|uname|wget|curl|nc|bash|sh)\b""")
         ),
         DpiSignature(
             "CRS-932120", "| bash", AlertCategory.COMMAND_INJECTION, AlertSeverity.CRITICAL,
             "OS Command Injection: Pipe to Shell",
-            Regex("""(?i)\|\s*(/bin/)?(ba)?sh\b""")
+            Pattern.compile("""(?i)\|\s*(/bin/)?(ba)?sh\b""")
         ),
         DpiSignature(
             "CRS-932130", "$(whoami)", AlertCategory.COMMAND_INJECTION, AlertSeverity.CRITICAL,
             "OS Command Injection: Subshell Execution",
-            Regex("""(?i)\$\((whoami|id|cat|uname|sh|bash)[^)]*\)""")
+            Pattern.compile("""(?i)\$\((whoami|id|cat|uname|sh|bash)[^)]{0,64}\)""")
         ),
         // Path Traversal (OWASP CRS 930xxx)
         DpiSignature(
             "CRS-930100", "../", AlertCategory.PATH_TRAVERSAL, AlertSeverity.HIGH,
             "Path Traversal: Directory Escape Sequence",
-            Regex("""(\.\./){2,}|(\.\.\\){2,}""")
+            Pattern.compile("""(\.\./){2,}|(\.\.\\){2,}""")
         )
     )
 
@@ -197,15 +220,17 @@ class IdsEngine {
         threatDomainsRef.set(domains.map { it.trim().lowercase() }.filter { it.isNotEmpty() }.toSet())
     }
 
-    fun inspect(packet: ParsedPacket, appUid: Int, appLabel: String): List<IdsAlertEntity> {
+    fun trackedFlowCount(): Int = synchronized(flowTableLock) { behaviorByKey.size }
+
+    fun inspect(packet: ParsedPacket, appUid: Int = -1, appLabel: String = "Unknown"): List<IdsAlertEntity> {
         val cfg = configRef.get()
         val alerts = ArrayList<IdsAlertEntity>()
         val now = System.currentTimeMillis()
         val srcEp = "${packet.srcIp}:${packet.srcPort}"
         val dstEp = "${packet.dstIp}:${packet.dstPort}"
 
-        // 1. DNS & TLS SNI Phishing + Heuristic Checks
-        val host = packet.dnsQueryDomain ?: packet.tlsInfo?.sniHost ?: packet.httpInfo?.hostHeader
+        // 1. DNS & TLS SNI Phishing + Heuristic Checks (from normalized ParsedPacket only)
+        val host = packet.domainOrSni?.take(253)
         val layer = when {
             packet.tlsInfo != null -> "TLS_METADATA"
             packet.httpInfo != null -> "CLEARTEXT_DPI"
@@ -241,22 +266,21 @@ class IdsEngine {
             }
         }
 
-        // 2. Behavioral Fuzzing / Port Scanning / Malformed Packet Spikes
+        // 2. Behavioral Fuzzing / Port Scanning / Malformed Packet Spikes (bounded LRU flow table)
         if (cfg.behavioralScanEnabled) {
             evaluateBehavior(packet, appUid, appLabel, srcEp, dstEp, now)?.let {
                 alerts.add(it)
             }
         }
 
-        // 3. HTTP Deep Packet Inspection (Aho-Corasick + Regex across URL, Query Params, Headers, Body)
+        // 3. HTTP Deep Packet Inspection (capped 2048B + Aho-Corasick + linear-time RE2J)
         if (cfg.httpDpiEnabled && packet.httpInfo != null && packet.httpInfo.isRequest) {
-            val rawText = packet.httpInfo.inspectableText
-            val decoded = runCatching { URLDecoder.decode(rawText.replace("+", "%2B"), "UTF-8") }
-                .getOrDefault(rawText)
+            val cappedRaw = packet.httpInfo.inspectableText.take(MAX_HTTP_INSPECT_BYTES)
+            val decoded = safeUrlDecode(cappedRaw).take(MAX_HTTP_INSPECT_BYTES)
             val lowerDecoded = decoded.lowercase()
             val candidates = matcher.scan(lowerDecoded)
             for (sig in candidates) {
-                if (sig.confirmRegex.containsMatchIn(decoded)) {
+                if (sig.confirmPattern.matcher(decoded).find()) {
                     alerts.add(
                         IdsAlertEntity(
                             timestamp = now,
@@ -264,7 +288,7 @@ class IdsEngine {
                             category = sig.category.name,
                             ruleId = sig.ruleId,
                             title = sig.title,
-                            description = "Matched ${sig.ruleId} in HTTP ${packet.httpInfo.method ?: "REQ"} ${packet.httpInfo.rawTarget ?: ""}",
+                            description = "Matched ${sig.ruleId} in HTTP ${packet.httpInfo.method ?: "REQ"} ${packet.httpInfo.rawTarget?.take(128) ?: ""}",
                             appUid = appUid,
                             appLabel = appLabel,
                             protocol = "HTTP",
@@ -283,14 +307,24 @@ class IdsEngine {
         return alerts
     }
 
+    private fun safeUrlDecode(input: String): String {
+        if (!input.contains('%')) return input
+        return runCatching {
+            URLDecoder.decode(input.replace("+", "%2B"), "UTF-8")
+        }.getOrDefault(input)
+    }
+
     private fun matchesThreatFeed(host: String): Boolean {
         val feed = threatDomainsRef.get()
         if (feed.isEmpty()) return false
-        if (feed.contains(host)) return true
-        var idx = host.indexOf('.')
-        while (idx != -1 && idx + 1 < host.length) {
-            if (feed.contains(host.substring(idx + 1))) return true
-            idx = host.indexOf('.', idx + 1)
+        val lower = host.lowercase()
+        if (feed.contains(lower)) return true
+        var idx = lower.indexOf('.')
+        var steps = 0
+        while (idx != -1 && idx + 1 < lower.length && steps < 16) {
+            steps++
+            if (feed.contains(lower.substring(idx + 1))) return true
+            idx = lower.indexOf('.', idx + 1)
         }
         return false
     }
@@ -305,7 +339,7 @@ class IdsEngine {
         layer: String,
         now: Long
     ): IdsAlertEntity? {
-        val labels = host.split('.').filter { it.isNotEmpty() }
+        val labels = host.split('.').filter { it.isNotEmpty() }.take(16)
         if (labels.size < 2) return null
 
         // Punycode / IDN Homograph check
@@ -328,9 +362,9 @@ class IdsEngine {
             )
         }
 
-        // Brand typosquatting + suspicious TLD
+        // Brand typosquatting + suspicious TLD (bounded label length <= 32 for O(1) Levenshtein)
         val tld = labels.last()
-        val sld = labels[labels.size - 2]
+        val sld = labels[labels.size - 2].take(32)
         val normalizedSld = sld.replace('0', 'o').replace('1', 'l').replace('3', 'e').replace('5', 's')
         for (brand in highValueBrands) {
             val dist = levenshtein(normalizedSld, brand)
@@ -355,7 +389,7 @@ class IdsEngine {
         }
 
         // High Shannon entropy DGA / DNS tunneling label check
-        val longestLabel = labels.maxByOrNull { it.length } ?: ""
+        val longestLabel = labels.maxByOrNull { it.length }?.take(63) ?: ""
         if (longestLabel.length >= 18) {
             val entropy = shannonEntropy(longestLabel)
             if (entropy >= 3.85) {
@@ -388,26 +422,37 @@ class IdsEngine {
         dstEp: String,
         now: Long
     ): IdsAlertEntity? {
-        val windowMs = 10_000L
-        val cooldownMs = 15_000L
         val key = "$appUid:${packet.dstIp}"
-        val stats = behaviorByKey.computeIfAbsent(key) { SlidingWindowStats() }
+        synchronized(flowTableLock) {
+            // Deterministic TTL eviction to purge stale flows under spoofed-IP floods
+            if (now - lastEvictionCheckMs > 15_000L && behaviorByKey.size > MAX_TRACKED_FLOWS / 2) {
+                lastEvictionCheckMs = now
+                val iter = behaviorByKey.entries.iterator()
+                while (iter.hasNext()) {
+                    val entry = iter.next()
+                    if (now - entry.value.lastSeenAt > FLOW_TTL_MS) {
+                        iter.remove()
+                    }
+                }
+            }
 
-        synchronized(stats) {
-            // Trim sliding window
-            while (stats.portTimestamps.isNotEmpty() && now - stats.portTimestamps.first().first > windowMs) {
+            val stats = behaviorByKey[key] ?: SlidingWindowStats(now).also { behaviorByKey[key] = it }
+            stats.lastSeenAt = now
+
+            while (stats.portTimestamps.isNotEmpty() && now - stats.portTimestamps.first().first > BEHAVIOR_WINDOW_MS) {
                 stats.portTimestamps.removeFirst()
             }
-            while (stats.malformedTimestamps.isNotEmpty() && now - stats.malformedTimestamps.first() > windowMs) {
+            while (stats.malformedTimestamps.isNotEmpty() && now - stats.malformedTimestamps.first() > BEHAVIOR_WINDOW_MS) {
                 stats.malformedTimestamps.removeFirst()
             }
-            while (stats.httpErrorTimestamps.isNotEmpty() && now - stats.httpErrorTimestamps.first() > windowMs) {
+            while (stats.httpErrorTimestamps.isNotEmpty() && now - stats.httpErrorTimestamps.first() > BEHAVIOR_WINDOW_MS) {
                 stats.httpErrorTimestamps.removeFirst()
             }
 
             if (packet.isMalformed) {
+                if (stats.malformedTimestamps.size >= MAX_WINDOW_EVENTS) stats.malformedTimestamps.removeFirst()
                 stats.malformedTimestamps.addLast(now)
-                if (stats.malformedTimestamps.size >= 8 && now - stats.lastAlertedAt > cooldownMs) {
+                if (stats.malformedTimestamps.size >= 8 && now - stats.lastAlertedAt > ALERT_COOLDOWN_MS) {
                     stats.lastAlertedAt = now
                     return IdsAlertEntity(
                         timestamp = now,
@@ -429,9 +474,10 @@ class IdsEngine {
             }
 
             if (packet.dstPort > 0 && (packet.isTcpSyn || packet.protocol == TransportProtocol.UDP)) {
+                if (stats.portTimestamps.size >= MAX_WINDOW_EVENTS) stats.portTimestamps.removeFirst()
                 stats.portTimestamps.addLast(now to packet.dstPort)
                 val distinctPorts = stats.portTimestamps.map { it.second }.toSet()
-                if (distinctPorts.size >= 10 && now - stats.lastAlertedAt > cooldownMs) {
+                if (distinctPorts.size >= 10 && now - stats.lastAlertedAt > ALERT_COOLDOWN_MS) {
                     stats.lastAlertedAt = now
                     return IdsAlertEntity(
                         timestamp = now,
@@ -454,8 +500,9 @@ class IdsEngine {
 
             val statusCode = packet.httpInfo?.statusCode
             if (statusCode != null && statusCode in setOf(400, 403, 404, 500)) {
+                if (stats.httpErrorTimestamps.size >= MAX_WINDOW_EVENTS) stats.httpErrorTimestamps.removeFirst()
                 stats.httpErrorTimestamps.addLast(now)
-                if (stats.httpErrorTimestamps.size >= 12 && now - stats.lastAlertedAt > cooldownMs) {
+                if (stats.httpErrorTimestamps.size >= 12 && now - stats.lastAlertedAt > ALERT_COOLDOWN_MS) {
                     stats.lastAlertedAt = now
                     return IdsAlertEntity(
                         timestamp = now,

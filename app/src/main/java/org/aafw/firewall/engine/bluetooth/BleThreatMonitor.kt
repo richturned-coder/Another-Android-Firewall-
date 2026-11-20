@@ -11,8 +11,41 @@ import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.aafw.firewall.engine.SafeByteCursor
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
+
+data class BleAdStructure(
+    val adType: Int,
+    val data: ByteArray
+)
+
+/**
+ * Zero-crash, O(n) BLE Advertising Data (AD) TLV parser.
+ * Explicitly terminates on `len == 0` (end of AD structures) and validates every structure
+ * length against remaining bytes to prevent infinite loops and out-of-bounds reads.
+ */
+object BleAdParser {
+    const val MAX_AD_STRUCTURES = 64
+
+    fun parseAdStructures(rawBytes: ByteArray): List<BleAdStructure> {
+        if (rawBytes.isEmpty()) return emptyList()
+        val cursor = SafeByteCursor(rawBytes)
+        val out = ArrayList<BleAdStructure>()
+        while (!cursor.isExhausted && out.size < MAX_AD_STRUCTURES) {
+            val beforePos = cursor.pos
+            val fieldLen = cursor.readU8() ?: break
+            if (fieldLen == 0) break // Explicit end-of-AD terminator prevents zero-length TLV loop
+            if (fieldLen > cursor.remaining) break
+            val adType = cursor.readU8() ?: break
+            val payloadLen = fieldLen - 1
+            val payload = cursor.readBytes(payloadLen, 255) ?: break
+            out.add(BleAdStructure(adType = adType, data = payload))
+            if (cursor.pos <= beforePos) break
+        }
+        return out
+    }
+}
 
 enum class BleThreatClass {
     NORMAL,

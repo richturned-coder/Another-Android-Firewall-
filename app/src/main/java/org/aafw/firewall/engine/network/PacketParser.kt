@@ -1,6 +1,6 @@
 package org.aafw.firewall.engine.network
 
-import java.net.InetAddress
+import org.aafw.firewall.engine.SafeByteCursor
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 
@@ -65,65 +65,194 @@ data class ParsedPacket(
     val domainOrSni: String? get() = dnsQueryDomain ?: tlsInfo?.sniHost ?: httpInfo?.hostHeader
 }
 
+/**
+ * Hardened zero-crash, O(n), bounded-memory binary packet dissector for untrusted TUN packets.
+ *
+ * Defends against:
+ * - Signed-byte bitshift pitfalls (all reads go through unsigned [SafeByteCursor])
+ * - IPv4 IHL < 5, truncated totalLength, and zero-length IPv4 options infinite loops
+ * - IPv6 extension-header chains/cycles (strict [MAX_IPV6_EXT_HEADERS] cap + monotonic offset advance)
+ * - TCP dataOffset < 5 and zero/invalid-length TCP option loops
+ * - UDP length < 8 or exceeding packet bounds
+ * - DNS compression pointer self-loops / cycles ([MAX_DNS_POINTER_JUMPS] + visited offset set)
+ * - Nested TLS ClientHello extension/SNI over-reads
+ */
 object PacketParser {
+    const val MAX_IPV4_OPTIONS = 40
+    const val MAX_IPV6_EXT_HEADERS = 8
+    const val MAX_TCP_OPTIONS = 40
+    const val MAX_DNS_POINTER_JUMPS = 16
+    const val MAX_DNS_LABELS = 128
+    const val MAX_TLS_EXTENSIONS = 64
+    const val MAX_TLS_CIPHERS = 512
+    const val MAX_HTTP_INSPECT_BYTES = 2048
+
     private val httpMethods = listOf("GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ")
 
+    private val ipv6ExtHeaders = setOf(
+        0,  // Hop-by-Hop Options
+        43, // Routing
+        44, // Fragment
+        51, // Authentication Header (AH)
+        60  // Destination Options
+    )
+
+    fun parse(raw: ByteArray): ParsedPacket? = parse(raw, raw.size)
+
     fun parse(raw: ByteArray, length: Int): ParsedPacket? {
-        if (length < 20) {
-            return malformedStub(4, length)
+        if (length <= 0 || raw.isEmpty()) return null
+        val safeLen = minOf(length, raw.size)
+        if (safeLen < 20) {
+            return malformedStub(4, safeLen)
         }
-        val version = (raw[0].toInt() ushr 4) and 0x0F
+        val cursor = SafeByteCursor.of(raw, 0, safeLen) ?: return malformedStub(4, safeLen)
+        val versionByte = cursor.peekU8() ?: return malformedStub(4, safeLen)
+        val version = (versionByte ushr 4) and 0x0F
         return when (version) {
-            4 -> parseIpv4(raw, length)
-            6 -> parseIpv6(raw, length)
-            else -> malformedStub(version, length)
+            4 -> parseIpv4(raw, cursor, safeLen)
+            6 -> parseIpv6(raw, cursor, safeLen)
+            else -> malformedStub(version, safeLen)
         }
     }
 
-    private fun parseIpv4(raw: ByteArray, length: Int): ParsedPacket {
-        val ihl = (raw[0].toInt() and 0x0F) * 4
-        if (ihl < 20 || ihl > length) return malformedStub(4, length)
-        val totalLen = ((raw[2].toInt() and 0xFF) shl 8) or (raw[3].toInt() and 0xFF)
-        val effectiveLen = minOf(length, maxOf(totalLen, ihl))
-        val isMalformed = totalLen < ihl || totalLen > length
-        val proto = TransportProtocol.fromIpProto(raw[9].toInt() and 0xFF)
-        val srcBytes = raw.copyOfRange(12, 16)
-        val dstBytes = raw.copyOfRange(16, 20)
-        val srcIp = formatIpv4(srcBytes)
-        val dstIp = formatIpv4(dstBytes)
+    private fun parseIpv4(raw: ByteArray, cursor: SafeByteCursor, safeLen: Int): ParsedPacket {
+        val verIhl = cursor.readU8() ?: return malformedStub(4, safeLen)
+        val ihl = (verIhl and 0x0F) * 4
+        if (ihl < 20 || ihl > safeLen) return malformedStub(4, safeLen)
+
+        if (!cursor.skip(1)) return malformedStub(4, safeLen) // DSCP/ECN
+        val totalLen = cursor.readU16BE() ?: return malformedStub(4, safeLen)
+        val effectiveLen = minOf(safeLen, maxOf(totalLen, ihl))
+        var isMalformed = totalLen < ihl || totalLen > safeLen
+
+        if (!cursor.skip(5)) return malformedStub(4, safeLen) // ID(2) + Flags/Frag(2) + TTL(1)
+        val protoByte = cursor.readU8() ?: return malformedStub(4, safeLen)
+        val proto = TransportProtocol.fromIpProto(protoByte)
+        if (!cursor.skip(2)) return malformedStub(4, safeLen) // Header checksum
+
+        val srcBytes = cursor.readBytes(4, 4) ?: return malformedStub(4, safeLen)
+        val dstBytes = cursor.readBytes(4, 4) ?: return malformedStub(4, safeLen)
+
+        // Validate IPv4 options TLV (defends against zero-length option infinite loops)
+        val optionsLen = ihl - 20
+        if (optionsLen > 0) {
+            val optCursor = cursor.slice(optionsLen)
+            if (optCursor == null || !validateIpv4Options(optCursor)) {
+                isMalformed = true
+            }
+        }
+
+        val transportCursor = SafeByteCursor.of(raw, ihl, effectiveLen - ihl)
+            ?: return malformedStub(4, safeLen)
+
         return parseTransport(
             raw = raw,
+            transportCursor = transportCursor,
             ipVersion = 4,
             ipHeaderLen = ihl,
             totalLen = effectiveLen,
             proto = proto,
-            srcIp = srcIp,
-            dstIp = dstIp,
+            srcIp = formatIpv4(srcBytes),
+            dstIp = formatIpv4(dstBytes),
             srcBytes = srcBytes,
             dstBytes = dstBytes,
             initialMalformed = isMalformed
         )
     }
 
-    private fun parseIpv6(raw: ByteArray, length: Int): ParsedPacket {
-        if (length < 40) return malformedStub(6, length)
-        val payloadLen = ((raw[4].toInt() and 0xFF) shl 8) or (raw[5].toInt() and 0xFF)
-        val nextHeader = raw[6].toInt() and 0xFF
+    private fun validateIpv4Options(optCursor: SafeByteCursor): Boolean {
+        var count = 0
+        while (!optCursor.isExhausted && count < MAX_IPV4_OPTIONS) {
+            count++
+            val beforePos = optCursor.pos
+            val optType = optCursor.readU8() ?: return false
+            when (optType) {
+                0x00 -> return true // End of Option List
+                0x01 -> Unit // NOP (1 byte)
+                else -> {
+                    val optLen = optCursor.readU8() ?: return false
+                    if (optLen < 2 || !optCursor.skip(optLen - 2)) return false
+                }
+            }
+            if (optCursor.pos <= beforePos) return false
+        }
+        return true
+    }
+
+    private fun parseIpv6(raw: ByteArray, cursor: SafeByteCursor, safeLen: Int): ParsedPacket {
+        if (safeLen < 40) return malformedStub(6, safeLen)
+        if (!cursor.skip(4)) return malformedStub(6, safeLen) // Version/TC/FlowLabel
+        val payloadLen = cursor.readU16BE() ?: return malformedStub(6, safeLen)
+        var nextHeader = cursor.readU8() ?: return malformedStub(6, safeLen)
+        if (!cursor.skip(1)) return malformedStub(6, safeLen) // Hop Limit
+
+        val srcBytes = cursor.readBytes(16, 16) ?: return malformedStub(6, safeLen)
+        val dstBytes = cursor.readBytes(16, 16) ?: return malformedStub(6, safeLen)
+
+        val effectiveLen = minOf(safeLen, 40 + payloadLen)
+        var isMalformed = (40 + payloadLen) > safeLen
+
+        val payloadCursor = SafeByteCursor.of(raw, 40, effectiveLen - 40)
+            ?: return malformedStub(6, safeLen)
+
+        // Safely traverse IPv6 extension header chain with strict hop limit and monotonic advance
+        var extCount = 0
+        while (nextHeader in ipv6ExtHeaders) {
+            if (extCount >= MAX_IPV6_EXT_HEADERS) {
+                isMalformed = true
+                break
+            }
+            extCount++
+            val beforePos = payloadCursor.pos
+            val nextHdrField = payloadCursor.readU8()
+            if (nextHdrField == null) {
+                isMalformed = true
+                break
+            }
+            val skipped = when (nextHeader) {
+                44 -> payloadCursor.skip(7) // Fragment header is fixed 8 bytes total
+                51 -> {
+                    // Authentication Header: length in 32-bit words minus 2 => (hdrExtLen + 2) * 4 bytes total
+                    val ahLenUnits = payloadCursor.readU8()
+                    if (ahLenUnits == null) {
+                        false
+                    } else {
+                        val totalAhBytes = (ahLenUnits + 2) * 4
+                        totalAhBytes >= 8 && payloadCursor.skip(totalAhBytes - 2)
+                    }
+                }
+                else -> {
+                    // Hop-by-Hop (0), Routing (43), Dest Options (60): (hdrExtLen + 1) * 8 bytes total
+                    val extLenUnits = payloadCursor.readU8()
+                    if (extLenUnits == null) {
+                        false
+                    } else {
+                        val totalExtBytes = (extLenUnits + 1) * 8
+                        totalExtBytes >= 8 && payloadCursor.skip(totalExtBytes - 2)
+                    }
+                }
+            }
+            if (!skipped || payloadCursor.pos <= beforePos) {
+                isMalformed = true
+                break
+            }
+            nextHeader = nextHdrField
+        }
+
         val proto = TransportProtocol.fromIpProto(nextHeader)
-        val srcBytes = raw.copyOfRange(8, 24)
-        val dstBytes = raw.copyOfRange(24, 40)
-        val srcIp = runCatching { InetAddress.getByAddress(srcBytes).hostAddress ?: "::" }.getOrDefault("::")
-        val dstIp = runCatching { InetAddress.getByAddress(dstBytes).hostAddress ?: "::" }.getOrDefault("::")
-        val effectiveLen = minOf(length, 40 + payloadLen)
-        val isMalformed = 40 + payloadLen > length
+        val transportHeaderStart = payloadCursor.pos
+        val transportCursor = SafeByteCursor.of(raw, transportHeaderStart, effectiveLen - transportHeaderStart)
+            ?: return malformedStub(6, safeLen)
+
         return parseTransport(
             raw = raw,
+            transportCursor = transportCursor,
             ipVersion = 6,
-            ipHeaderLen = 40,
+            ipHeaderLen = transportHeaderStart,
             totalLen = effectiveLen,
             proto = proto,
-            srcIp = srcIp,
-            dstIp = dstIp,
+            srcIp = formatIpv6(srcBytes),
+            dstIp = formatIpv6(dstBytes),
             srcBytes = srcBytes,
             dstBytes = dstBytes,
             initialMalformed = isMalformed
@@ -132,6 +261,7 @@ object PacketParser {
 
     private fun parseTransport(
         raw: ByteArray,
+        transportCursor: SafeByteCursor,
         ipVersion: Int,
         ipHeaderLen: Int,
         totalLen: Int,
@@ -148,55 +278,79 @@ object PacketParser {
         var tcpSeq = 0L
         var tcpAck = 0L
         var payloadOffset = ipHeaderLen
+        var payloadLen = 0
         var malformed = initialMalformed
 
         when (proto) {
             TransportProtocol.TCP -> {
-                if (totalLen < ipHeaderLen + 20) {
+                if (transportCursor.remaining < 20) {
                     malformed = true
+                    payloadOffset = totalLen
                 } else {
-                    srcPort = readU16(raw, ipHeaderLen)
-                    dstPort = readU16(raw, ipHeaderLen + 2)
-                    tcpSeq = readU32(raw, ipHeaderLen + 4)
-                    tcpAck = readU32(raw, ipHeaderLen + 8)
-                    val dataOffset = ((raw[ipHeaderLen + 12].toInt() ushr 4) and 0x0F) * 4
-                    tcpFlags = raw[ipHeaderLen + 13].toInt() and 0x3F
-                    if (dataOffset < 20 || ipHeaderLen + dataOffset > totalLen) {
+                    srcPort = transportCursor.readU16BE() ?: 0
+                    dstPort = transportCursor.readU16BE() ?: 0
+                    tcpSeq = transportCursor.readU32BE() ?: 0L
+                    tcpAck = transportCursor.readU32BE() ?: 0L
+                    val offsetByte = transportCursor.readU8() ?: 0
+                    val flagsByte = transportCursor.readU8() ?: 0
+                    transportCursor.skip(6) // Window(2) + Checksum(2) + Urgent(2)
+
+                    val dataOffsetWords = (offsetByte ushr 4) and 0x0F
+                    val dataOffsetBytes = dataOffsetWords * 4
+                    tcpFlags = flagsByte and 0x3F
+
+                    if (dataOffsetWords < 5 || dataOffsetBytes > (totalLen - ipHeaderLen)) {
                         malformed = true
                         payloadOffset = totalLen
                     } else {
-                        payloadOffset = ipHeaderLen + dataOffset
+                        val optBytes = dataOffsetBytes - 20
+                        if (optBytes > 0) {
+                            val optCursor = transportCursor.slice(optBytes)
+                            if (optCursor == null || !validateTcpOptions(optCursor)) {
+                                malformed = true
+                            }
+                        }
+                        payloadOffset = ipHeaderLen + dataOffsetBytes
+                        payloadLen = maxOf(0, totalLen - payloadOffset)
                     }
                 }
             }
             TransportProtocol.UDP -> {
-                if (totalLen < ipHeaderLen + 8) {
+                if (transportCursor.remaining < 8) {
                     malformed = true
+                    payloadOffset = totalLen
                 } else {
-                    srcPort = readU16(raw, ipHeaderLen)
-                    dstPort = readU16(raw, ipHeaderLen + 2)
-                    val udpLen = readU16(raw, ipHeaderLen + 4)
-                    if (udpLen < 8 || ipHeaderLen + udpLen > totalLen) {
+                    srcPort = transportCursor.readU16BE() ?: 0
+                    dstPort = transportCursor.readU16BE() ?: 0
+                    val udpLen = transportCursor.readU16BE() ?: 0
+                    transportCursor.skip(2) // UDP Checksum
+                    val maxUdpAvailable = totalLen - ipHeaderLen
+                    if (udpLen < 8 || udpLen > maxUdpAvailable) {
                         malformed = true
+                        payloadOffset = ipHeaderLen + 8
+                        payloadLen = maxOf(0, totalLen - payloadOffset)
+                    } else {
+                        payloadOffset = ipHeaderLen + 8
+                        payloadLen = udpLen - 8
                     }
-                    payloadOffset = ipHeaderLen + 8
                 }
             }
             else -> {
                 payloadOffset = minOf(totalLen, ipHeaderLen + 8)
+                payloadLen = maxOf(0, totalLen - payloadOffset)
             }
         }
 
-        val payloadLen = maxOf(0, totalLen - payloadOffset)
         var dnsDomain: String? = null
         var tlsInfo: TlsClientHelloInfo? = null
         var httpInfo: HttpParsedPayload? = null
 
-        if (!malformed && payloadLen > 0) {
+        if (!malformed && payloadLen > 0 && payloadOffset >= 0 && payloadOffset + payloadLen <= raw.size) {
             if (proto == TransportProtocol.UDP && (dstPort == 53 || srcPort == 53)) {
                 dnsDomain = extractDnsQueryDomain(raw, payloadOffset, payloadLen)
             } else if (proto == TransportProtocol.TCP) {
-                if (raw[payloadOffset].toInt() == 0x16 && payloadLen > 43) {
+                val firstPayloadByte = raw[payloadOffset].toInt() and 0xFF
+                if (firstPayloadByte == 0x16 && payloadLen > 43) {
                     tlsInfo = extractTlsClientHello(raw, payloadOffset, payloadLen)
                 } else {
                     httpInfo = extractHttpPayload(raw, payloadOffset, payloadLen)
@@ -227,122 +381,183 @@ object PacketParser {
         )
     }
 
-    fun extractDnsQueryDomain(buf: ByteArray, offset: Int, len: Int): String? {
-        if (len < 13) return null
-        val qdCount = readU16(buf, offset + 4)
-        if (qdCount <= 0) return null
-        var pos = offset + 12
-        val end = offset + len
-        val sb = StringBuilder()
-        var guard = 0
-        while (pos < end && guard < 128) {
-            guard++
-            val labelLen = buf[pos].toInt() and 0xFF
-            if (labelLen == 0) break
-            if ((labelLen and 0xC0) == 0xC0) break
-            pos++
-            if (pos + labelLen > end) return null
-            if (sb.isNotEmpty()) sb.append('.')
-            for (i in 0 until labelLen) {
-                val c = (buf[pos + i].toInt() and 0xFF).toChar()
-                sb.append(c.lowercaseChar())
+    private fun validateTcpOptions(optCursor: SafeByteCursor): Boolean {
+        var count = 0
+        while (!optCursor.isExhausted && count < MAX_TCP_OPTIONS) {
+            count++
+            val beforePos = optCursor.pos
+            val kind = optCursor.readU8() ?: return false
+            when (kind) {
+                0x00 -> return true // End of Options List
+                0x01 -> Unit // NOP (1 byte)
+                else -> {
+                    val optLen = optCursor.readU8() ?: return false
+                    if (optLen < 2 || !optCursor.skip(optLen - 2)) return false
+                }
             }
-            pos += labelLen
+            if (optCursor.pos <= beforePos) return false
+        }
+        return true
+    }
+
+    /**
+     * Parses a DNS QNAME from a UDP DNS message with full cycle protection against
+     * RFC 1035 0xC0 compression pointer loops.
+     */
+    fun extractDnsQueryDomain(buf: ByteArray, offset: Int, len: Int): String? {
+        val dnsCursor = SafeByteCursor.of(buf, offset, len) ?: return null
+        if (dnsCursor.size < 13) return null
+        if (!dnsCursor.skip(4)) return null // Transaction ID(2) + Flags(2)
+        val qdCount = dnsCursor.readU16BE() ?: return null
+        if (qdCount <= 0) return null
+        if (!dnsCursor.skip(6)) return null // ANCOUNT + NSCOUNT + ARCOUNT
+
+        val visitedOffsets = HashSet<Int>(16)
+        val sb = StringBuilder()
+        var labelCount = 0
+        var pointerJumps = 0
+
+        while (!dnsCursor.isExhausted && labelCount < MAX_DNS_LABELS) {
+            val relOffset = dnsCursor.pos - dnsCursor.start
+            if (!visitedOffsets.add(relOffset)) {
+                // Detected compression cycle or revisit
+                return null
+            }
+
+            val labelLen = dnsCursor.readU8() ?: return null
+            if (labelLen == 0) break
+
+            val highBits = labelLen and 0xC0
+            if (highBits == 0xC0) {
+                pointerJumps++
+                if (pointerJumps > MAX_DNS_POINTER_JUMPS) return null
+                val secondByte = dnsCursor.readU8() ?: return null
+                val targetRelOffset = ((labelLen and 0x3F) shl 8) or secondByte
+                if (targetRelOffset < 12 || targetRelOffset >= dnsCursor.size || targetRelOffset in visitedOffsets) {
+                    return null
+                }
+                if (!dnsCursor.seekRelative(targetRelOffset)) return null
+                continue
+            } else if (highBits != 0) {
+                // Reserved/invalid RFC 1035 label type bits
+                return null
+            }
+
+            if (labelLen > 63 || labelLen > dnsCursor.remaining) return null
+            val labelText = dnsCursor.readAscii(labelLen) ?: return null
+            if (sb.isNotEmpty()) sb.append('.')
+            if (sb.length + labelText.length > 253) return null
+            for (ch in labelText) {
+                val lower = ch.lowercaseChar()
+                if (lower !in 'a'..'z' && lower !in '0'..'9' && lower != '-' && lower != '_') {
+                    return null
+                }
+                sb.append(lower)
+            }
+            labelCount++
         }
         return sb.toString().takeIf { it.contains('.') && it.length in 3..253 }
     }
 
+    /**
+     * Bounds-checked TLS ClientHello dissector using zero-copy [SafeByteCursor] sub-slices
+     * for every nested record, handshake, cipher, extension, and SNI boundary.
+     */
     fun extractTlsClientHello(buf: ByteArray, offset: Int, len: Int): TlsClientHelloInfo? {
-        if (len < 48) return null
-        val end = offset + len
-        if ((buf[offset].toInt() and 0xFF) != 0x16) return null
-        val handshakeType = buf[offset + 5].toInt() and 0xFF
-        if (handshakeType != 0x01) return null // ClientHello only
+        val outer = SafeByteCursor.of(buf, offset, len) ?: return null
+        if (outer.size < 48) return null
 
-        val clientVersion = readU16(buf, offset + 9)
-        var pos = offset + 11 + 32 // version(2) + random(32)
-        if (pos >= end) return null
+        val contentType = outer.readU8() ?: return null
+        if (contentType != 0x16) return null // TLS Handshake record
+        if (!outer.skip(2)) return null // Record protocol version
+        val recordLen = outer.readU16BE() ?: return null
+        val recordCursor = outer.slice(minOf(recordLen, outer.remaining)) ?: return null
 
-        val sessionIdLen = buf[pos].toInt() and 0xFF
-        pos += 1 + sessionIdLen
-        if (pos + 2 > end) return null
+        val handshakeType = recordCursor.readU8() ?: return null
+        if (handshakeType != 0x01) return null // ClientHello
+        val handshakeLen = recordCursor.readU24BE() ?: return null
+        val hsCursor = recordCursor.slice(minOf(handshakeLen, recordCursor.remaining)) ?: return null
 
-        val cipherLen = readU16(buf, pos)
-        pos += 2
-        if (pos + cipherLen > end) return null
+        val clientVersion = hsCursor.readU16BE() ?: return null
+        if (!hsCursor.skip(32)) return null // Client Random
 
-        val ciphers = mutableListOf<Int>()
-        var cPos = pos
-        while (cPos + 1 < pos + cipherLen) {
-            val cs = readU16(buf, cPos)
+        val sessionIdLen = hsCursor.readU8() ?: return null
+        if (!hsCursor.skip(sessionIdLen)) return null
+
+        val cipherLen = hsCursor.readU16BE() ?: return null
+        if (cipherLen % 2 != 0) return null
+        val cipherCursor = hsCursor.slice(cipherLen) ?: return null
+        val ciphers = ArrayList<Int>(minOf(cipherLen / 2, MAX_TLS_CIPHERS))
+        while (cipherCursor.remaining >= 2 && ciphers.size < MAX_TLS_CIPHERS) {
+            val cs = cipherCursor.readU16BE() ?: break
             if (!isGreaseValue(cs)) ciphers.add(cs)
-            cPos += 2
         }
-        pos += cipherLen
-        if (pos >= end) return null
 
-        val compLen = buf[pos].toInt() and 0xFF
-        pos += 1 + compLen
-        if (pos + 2 > end) return null
-
-        val extTotalLen = readU16(buf, pos)
-        pos += 2
-        val extEnd = minOf(end, pos + extTotalLen)
+        val compLen = hsCursor.readU8() ?: return null
+        if (!hsCursor.skip(compLen)) return null
 
         var sni: String? = null
-        val extensions = mutableListOf<Int>()
-        val groups = mutableListOf<Int>()
-        val ecFormats = mutableListOf<Int>()
+        val extensions = ArrayList<Int>()
+        val groups = ArrayList<Int>()
+        val ecFormats = ArrayList<Int>()
         var negotiatedTls13 = false
 
-        while (pos + 4 <= extEnd) {
-            val extType = readU16(buf, pos)
-            val extLen = readU16(buf, pos + 2)
-            pos += 4
-            if (pos + extLen > extEnd) break
-            if (!isGreaseValue(extType)) extensions.add(extType)
+        if (hsCursor.remaining >= 2) {
+            val extTotalLen = hsCursor.readU16BE() ?: return null
+            val extListCursor = hsCursor.slice(minOf(extTotalLen, hsCursor.remaining)) ?: return null
 
-            when (extType) {
-                0x0000 -> { // SNI
-                    if (extLen >= 5) {
-                        val nameType = buf[pos + 2].toInt() and 0xFF
-                        val nameLen = readU16(buf, pos + 3)
-                        if (nameType == 0 && pos + 5 + nameLen <= extEnd) {
-                            sni = String(buf, pos + 5, nameLen, Charsets.US_ASCII).lowercase()
+            var extCount = 0
+            while (extListCursor.remaining >= 4 && extCount < MAX_TLS_EXTENSIONS) {
+                extCount++
+                val extType = extListCursor.readU16BE() ?: break
+                val extLen = extListCursor.readU16BE() ?: break
+                val extCursor = extListCursor.slice(extLen) ?: break
+                if (!isGreaseValue(extType)) extensions.add(extType)
+
+                when (extType) {
+                    0x0000 -> { // SNI
+                        val sniListLen = extCursor.readU16BE()
+                        if (sniListLen != null) {
+                            val sniList = extCursor.slice(sniListLen)
+                            if (sniList != null && sniList.remaining >= 3) {
+                                val nameType = sniList.readU8()
+                                val nameLen = sniList.readU16BE()
+                                if (nameType == 0 && nameLen != null && nameLen in 1..253) {
+                                    sni = sniList.readAscii(nameLen)?.lowercase()
+                                }
+                            }
                         }
                     }
-                }
-                0x000A -> { // Supported Groups
-                    if (extLen >= 2) {
-                        val listLen = readU16(buf, pos)
-                        var gPos = pos + 2
-                        while (gPos + 1 < minOf(pos + 2 + listLen, pos + extLen)) {
-                            val g = readU16(buf, gPos)
-                            if (!isGreaseValue(g)) groups.add(g)
-                            gPos += 2
+                    0x000A -> { // Supported Groups
+                        val listLen = extCursor.readU16BE()
+                        if (listLen != null && listLen % 2 == 0) {
+                            val gCursor = extCursor.slice(listLen)
+                            while (gCursor != null && gCursor.remaining >= 2 && groups.size < 64) {
+                                val g = gCursor.readU16BE() ?: break
+                                if (!isGreaseValue(g)) groups.add(g)
+                            }
                         }
                     }
-                }
-                0x000B -> { // EC Point Formats
-                    if (extLen >= 1) {
-                        val fmtLen = buf[pos].toInt() and 0xFF
-                        for (i in 0 until minOf(fmtLen, extLen - 1)) {
-                            ecFormats.add(buf[pos + 1 + i].toInt() and 0xFF)
+                    0x000B -> { // EC Point Formats
+                        val fmtLen = extCursor.readU8()
+                        if (fmtLen != null) {
+                            val fCursor = extCursor.slice(fmtLen)
+                            while (fCursor != null && !fCursor.isExhausted && ecFormats.size < 32) {
+                                ecFormats.add(fCursor.readU8() ?: break)
+                            }
                         }
                     }
-                }
-                0x002B -> { // Supported Versions (detect TLS 1.3 0x0304)
-                    if (extLen >= 3) {
-                        val vLen = buf[pos].toInt() and 0xFF
-                        var vPos = pos + 1
-                        while (vPos + 1 < minOf(pos + 1 + vLen, pos + extLen)) {
-                            if (readU16(buf, vPos) == 0x0304) negotiatedTls13 = true
-                            vPos += 2
+                    0x002B -> { // Supported Versions
+                        val vLen = extCursor.readU8()
+                        if (vLen != null && vLen % 2 == 0) {
+                            val vCursor = extCursor.slice(vLen)
+                            while (vCursor != null && vCursor.remaining >= 2) {
+                                if (vCursor.readU16BE() == 0x0304) negotiatedTls13 = true
+                            }
                         }
                     }
                 }
             }
-            pos += extLen
         }
 
         val ja3Raw = buildString {
@@ -367,9 +582,11 @@ object PacketParser {
     }
 
     fun extractHttpPayload(buf: ByteArray, offset: Int, len: Int): HttpParsedPayload? {
-        val sampleLen = minOf(len, 4096)
+        val sampleLen = minOf(len, MAX_HTTP_INSPECT_BYTES)
         if (sampleLen < 12) return null
-        val text = String(buf, offset, sampleLen, Charsets.ISO_8859_1)
+        val cursor = SafeByteCursor.of(buf, offset, sampleLen) ?: return null
+        val text = cursor.readLatin1(sampleLen) ?: return null
+
         val isResponse = text.startsWith("HTTP/1.") || text.startsWith("HTTP/2")
         val matchedMethod = if (!isResponse) httpMethods.firstOrNull { text.startsWith(it) }?.trim() else null
         if (!isResponse && matchedMethod == null) return null
@@ -387,6 +604,7 @@ object PacketParser {
             if (line.isBlank()) break
             if (line.startsWith("Host:", ignoreCase = true)) {
                 hostHeader = line.substringAfter(':').trim().substringBefore(':').lowercase()
+                    .takeIf { it.length in 1..253 }
                 break
             }
         }
@@ -476,7 +694,7 @@ object PacketParser {
     fun computeChecksum(buf: ByteArray, offset: Int, length: Int): Int {
         var sum = 0L
         var i = offset
-        val end = offset + length
+        val end = minOf(buf.size, offset + length)
         while (i + 1 < end) {
             sum += ((buf[i].toInt() and 0xFF) shl 8) or (buf[i + 1].toInt() and 0xFF)
             i += 2
@@ -507,7 +725,7 @@ object PacketParser {
         sum += transportLen.toLong()
 
         var i = transportOffset
-        val end = transportOffset + transportLen
+        val end = minOf(buf.size, transportOffset + transportLen)
         while (i + 1 < end) {
             sum += ((buf[i].toInt() and 0xFF) shl 8) or (buf[i + 1].toInt() and 0xFF)
             i += 2
@@ -532,14 +750,16 @@ object PacketParser {
     private fun formatIpv4(bytes: ByteArray): String =
         "${bytes[0].toInt() and 0xFF}.${bytes[1].toInt() and 0xFF}.${bytes[2].toInt() and 0xFF}.${bytes[3].toInt() and 0xFF}"
 
-    private fun readU16(buf: ByteArray, offset: Int): Int =
-        ((buf[offset].toInt() and 0xFF) shl 8) or (buf[offset + 1].toInt() and 0xFF)
-
-    private fun readU32(buf: ByteArray, offset: Int): Long =
-        ((buf[offset].toLong() and 0xFF) shl 24) or
-            ((buf[offset + 1].toLong() and 0xFF) shl 16) or
-            ((buf[offset + 2].toLong() and 0xFF) shl 8) or
-            (buf[offset + 3].toLong() and 0xFF)
+    private fun formatIpv6(bytes: ByteArray): String {
+        if (bytes.size != 16) return "::"
+        val sb = StringBuilder(39)
+        for (i in 0 until 8) {
+            if (i > 0) sb.append(':')
+            val group = ((bytes[i * 2].toInt() and 0xFF) shl 8) or (bytes[i * 2 + 1].toInt() and 0xFF)
+            sb.append(group.toString(16))
+        }
+        return sb.toString()
+    }
 
     private fun writeU16(buf: ByteArray, offset: Int, value: Int) {
         buf[offset] = ((value ushr 8) and 0xFF).toByte()
@@ -576,7 +796,7 @@ object PacketParser {
     )
 
     fun toHexPreview(buf: ByteArray, length: Int, maxBytes: Int = 96): String {
-        val count = minOf(length, maxBytes)
+        val count = minOf(maxOf(0, length), minOf(buf.size, maxBytes))
         val sb = StringBuilder(count * 3)
         for (i in 0 until count) {
             if (i > 0) sb.append(if (i % 16 == 0) '\n' else ' ')
@@ -586,8 +806,9 @@ object PacketParser {
     }
 
     fun writeBufferToByteArray(buffer: ByteBuffer, length: Int): ByteArray {
-        val out = ByteArray(length)
-        System.arraycopy(buffer.array(), 0, out, 0, length)
+        val safeLen = length.coerceIn(0, buffer.array().size)
+        val out = ByteArray(safeLen)
+        System.arraycopy(buffer.array(), 0, out, 0, safeLen)
         return out
     }
 }

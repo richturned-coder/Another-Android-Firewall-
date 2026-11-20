@@ -7,14 +7,12 @@ import android.os.Build
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import org.aafw.firewall.engine.SafeByteCursor
 import java.io.BufferedInputStream
-import java.io.DataInputStream
-import java.io.EOFException
+import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.zip.ZipInputStream
 
 enum class HciPacketLayer(val label: String) {
@@ -46,9 +44,25 @@ data class BtSnoopParseResult(
     val error: String? = null
 )
 
+/**
+ * Hardened RFC 1761 BTSnoop v1 + HCI/L2CAP/ATT/BLE-AD parser using [SafeByteCursor].
+ *
+ * Defends against:
+ * - Pre-allocation OOM / NegativeArraySizeException from crafted `includedLength` (`0x7FFFFFFF`, `< 0`)
+ * - Unbounded stream / ZIP bomb exhaustion ([MAX_HCI_RECORD_BYTES], [MAX_TOTAL_STREAM_BYTES], [MAX_RECORDS_SCANNED])
+ * - Invalid datalink types (strictly validates 1001..1004)
+ * - Truncated trailing records (returns all previously parsed valid frames cleanly)
+ * - BLE AD TLV zero-length infinite loops inside HCI LE Advertising Reports
+ */
 object BtSnoopParser {
     private val MAGIC = byteArrayOf(0x62, 0x74, 0x73, 0x6E, 0x6F, 0x6F, 0x70, 0x00) // "btsnoop\0"
     private const val BTSNOOP_EPOCH_DELTA_US = 0x00dcddb30f2f8000L
+
+    const val MAX_HCI_RECORD_BYTES = 65_536
+    const val MAX_TOTAL_STREAM_BYTES = 32 * 1024 * 1024
+    const val MAX_RECORDS_SCANNED = 100_000
+    private const val MAX_ZIP_ENTRIES = 2_048
+    private const val READ_CHUNK_SIZE = 4_096
 
     fun isShizukuInstalled(context: Context): Boolean {
         return try {
@@ -66,6 +80,9 @@ object BtSnoopParser {
             false
         }
     }
+
+    fun parse(input: InputStream, sourceName: String = "stream", maxFrames: Int = 2000): BtSnoopParseResult =
+        parseBtSnoopStream(input, sourceName, maxFrames)
 
     suspend fun parseUri(context: Context, uri: Uri, displayName: String): BtSnoopParseResult =
         withContext(Dispatchers.IO) {
@@ -97,7 +114,9 @@ object BtSnoopParser {
     private fun parseFromBugreportZip(input: InputStream, archiveName: String): BtSnoopParseResult {
         ZipInputStream(input).use { zis ->
             var entry = zis.nextEntry
-            while (entry != null) {
+            var inspectedEntries = 0
+            while (entry != null && inspectedEntries < MAX_ZIP_ENTRIES) {
+                inspectedEntries++
                 val lower = entry.name.lowercase()
                 if (!entry.isDirectory && (lower.endsWith("btsnoop_hci.log") || lower.contains("btsnoop"))) {
                     return parseBtSnoopStream(zis, "$archiveName -> ${entry.name}")
@@ -115,13 +134,8 @@ object BtSnoopParser {
     }
 
     fun parseBtSnoopStream(input: InputStream, sourceName: String, maxFrames: Int = 2000): BtSnoopParseResult {
-        val dis = DataInputStream(input)
-        val header = ByteArray(16)
-        try {
-            dis.readFully(header)
-        } catch (_: EOFException) {
-            return BtSnoopParseResult(sourceName, 0, 0, emptyList(), "File too small to be a valid btsnoop log.")
-        }
+        val header = readExactBounded(input, 16)
+            ?: return BtSnoopParseResult(sourceName, 0, 0, emptyList(), "File too small to be a valid btsnoop log.")
 
         for (i in 0 until 8) {
             if (header[i] != MAGIC[i]) {
@@ -131,41 +145,42 @@ object BtSnoopParser {
                 )
             }
         }
-        val hdrBuf = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN)
-        hdrBuf.position(8)
-        val version = hdrBuf.int
-        val datalink = hdrBuf.int
+        val hdrCursor = SafeByteCursor(header, 8, 16)
+        val version = hdrCursor.readS32BE() ?: return BtSnoopParseResult(sourceName, 0, 0, emptyList(), "Truncated header.")
+        val datalink = hdrCursor.readS32BE() ?: return BtSnoopParseResult(sourceName, 0, 0, emptyList(), "Truncated header.")
         if (version != 1) {
             return BtSnoopParseResult(sourceName, datalink, 0, emptyList(), "Unsupported btsnoop version $version.")
         }
+        if (datalink !in 1001..1004) {
+            return BtSnoopParseResult(sourceName, datalink, 0, emptyList(), "Unsupported btsnoop datalink type $datalink.")
+        }
 
-        val frames = ArrayList<HciParsedFrame>()
+        val safeMaxFrames = maxFrames.coerceIn(1, 20_000)
+        val frames = ArrayList<HciParsedFrame>(minOf(safeMaxFrames, 256))
         var total = 0
-        val recHdr = ByteArray(24)
+        var totalBytesRead = 16L
 
-        while (true) {
-            try {
-                dis.readFully(recHdr)
-            } catch (_: EOFException) {
-                break
-            }
-            val rb = ByteBuffer.wrap(recHdr).order(ByteOrder.BIG_ENDIAN)
-            val origLen = rb.int
-            val inclLen = rb.int
-            val flags = rb.int
-            rb.int // cumulative drops
-            val tsMicros = rb.long
+        while (total < MAX_RECORDS_SCANNED && totalBytesRead < MAX_TOTAL_STREAM_BYTES) {
+            val recHdr = readExactBounded(input, 24) ?: break // Graceful EOF / truncated trailing header
+            totalBytesRead += 24L
 
-            if (inclLen <= 0 || inclLen > 65_536) break
-            val payload = ByteArray(inclLen)
-            try {
-                dis.readFully(payload)
-            } catch (_: EOFException) {
-                break
-            }
+            val recCursor = SafeByteCursor(recHdr)
+            val origLen = recCursor.readS32BE() ?: break
+            val inclLen = recCursor.readS32BE() ?: break
+            val flags = recCursor.readS32BE() ?: break
+            recCursor.readS32BE() ?: break // cumulative drops
+            val tsMicros = recCursor.readS64BE() ?: break
+
+            // Reject negative signed ints, zero-byte empty records, or oversized wire lengths BEFORE allocation
+            if (origLen < 0 || inclLen !in 1..MAX_HCI_RECORD_BYTES) break
+            if (totalBytesRead + inclLen.toLong() > MAX_TOTAL_STREAM_BYTES) break
+
+            // Read in incremental chunks so a forged inclLen on a short stream never triggers large pre-allocation
+            val payload = readExactBounded(input, inclLen) ?: break // Graceful truncated trailing record
+            totalBytesRead += inclLen.toLong()
 
             total++
-            if (frames.size < maxFrames) {
+            if (frames.size < safeMaxFrames) {
                 val epochMs = ((tsMicros - BTSNOOP_EPOCH_DELTA_US) / 1000L).coerceAtLeast(0L)
                 frames.add(
                     decodeHciFrame(
@@ -203,33 +218,38 @@ object BtSnoopParser {
         try {
             socket = Socket()
             socket.connect(InetSocketAddress(host, port), 3500)
-            val dis = DataInputStream(BufferedInputStream(socket.getInputStream()))
-            val header = ByteArray(16)
-            dis.readFully(header)
+            val buffered = BufferedInputStream(socket.getInputStream())
+            val header = readExactBounded(buffered, 16)
+            if (header == null) {
+                onError("Peer at $host:$port closed before sending btsnoop header.")
+                return@withContext
+            }
             for (i in 0 until 8) {
                 if (header[i] != MAGIC[i]) {
                     onError("Connected to $host:$port, but peer did not send a btsnoop header.")
                     return@withContext
                 }
             }
-            val hdrBuf = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN)
-            hdrBuf.position(12)
-            val datalink = hdrBuf.int
+            val hdrCursor = SafeByteCursor(header, 8, 16)
+            val version = hdrCursor.readS32BE() ?: -1
+            val datalink = hdrCursor.readS32BE() ?: -1
+            if (version != 1 || datalink !in 1001..1004) {
+                onError("Unsupported btsnoop header from $host:$port (v=$version, datalink=$datalink).")
+                return@withContext
+            }
             onConnected("Live btsnoop stream active ($host:$port, datalink=$datalink)")
 
-            val recHdr = ByteArray(24)
             var idx = 0
             while (isActive && !socket.isClosed) {
-                dis.readFully(recHdr)
-                val rb = ByteBuffer.wrap(recHdr).order(ByteOrder.BIG_ENDIAN)
-                val origLen = rb.int
-                val inclLen = rb.int
-                val flags = rb.int
-                rb.int
-                val tsMicros = rb.long
-                if (inclLen <= 0 || inclLen > 65_536) continue
-                val payload = ByteArray(inclLen)
-                dis.readFully(payload)
+                val recHdr = readExactBounded(buffered, 24) ?: break
+                val rc = SafeByteCursor(recHdr)
+                val origLen = rc.readS32BE() ?: break
+                val inclLen = rc.readS32BE() ?: break
+                val flags = rc.readS32BE() ?: break
+                rc.readS32BE() ?: break
+                val tsMicros = rc.readS64BE() ?: break
+                if (origLen < 0 || inclLen !in 1..MAX_HCI_RECORD_BYTES) break
+                val payload = readExactBounded(buffered, inclLen) ?: break
                 idx++
                 val epochMs = ((tsMicros - BTSNOOP_EPOCH_DELTA_US) / 1000L).coerceAtLeast(System.currentTimeMillis())
                 onFrame(decodeHciFrame(idx, epochMs, flags, datalink, payload, origLen))
@@ -239,6 +259,36 @@ object BtSnoopParser {
         } finally {
             runCatching { socket?.close() }
         }
+    }
+
+    /**
+     * Reads exactly [expectedLen] bytes from [input] using bounded chunk transfers so a malicious
+     * length header on a short/truncated stream never pre-allocates a huge buffer.
+     * Returns `null` on premature EOF or invalid length.
+     */
+    private fun readExactBounded(input: InputStream, expectedLen: Int): ByteArray? {
+        if (expectedLen < 0 || expectedLen > MAX_HCI_RECORD_BYTES) return null
+        if (expectedLen == 0) return ByteArray(0)
+        if (expectedLen <= READ_CHUNK_SIZE) {
+            val buf = ByteArray(expectedLen)
+            var off = 0
+            while (off < expectedLen) {
+                val n = input.read(buf, off, expectedLen - off)
+                if (n <= 0) return null
+                off += n
+            }
+            return buf
+        }
+        val baos = ByteArrayOutputStream(minOf(expectedLen, READ_CHUNK_SIZE))
+        val chunk = ByteArray(READ_CHUNK_SIZE)
+        var remaining = expectedLen
+        while (remaining > 0) {
+            val n = input.read(chunk, 0, minOf(chunk.size, remaining))
+            if (n <= 0) return null
+            baos.write(chunk, 0, n)
+            remaining -= n
+        }
+        return baos.toByteArray()
     }
 
     fun decodeHciFrame(
@@ -257,9 +307,13 @@ object BtSnoopParser {
             return HciParsedFrame(index, timestampMillis, direction, HciPacketLayer.RAW, "Empty HCI Frame", "", origLen, hex)
         }
 
+        val cursor = SafeByteCursor(payload)
+        val firstByte = cursor.peekU8() ?: return HciParsedFrame(index, timestampMillis, direction, HciPacketLayer.RAW, "Empty HCI Frame", "", origLen, hex)
         // Datalink 1002 = HCI UART (H4) where byte 0 is packet indicator (01=CMD, 02=ACL, 03=SCO, 04=EVT)
-        val hasH4Prefix = datalink == 1002 || (payload[0].toInt() in 1..4)
-        val h4Type = if (hasH4Prefix) payload[0].toInt() and 0xFF else {
+        val hasH4Prefix = datalink == 1002 || (firstByte in 1..4)
+        val h4Type = if (hasH4Prefix) {
+            cursor.readU8() ?: 0
+        } else {
             val isCmdOrEvt = (flags and 0x02) != 0
             when {
                 isCmdOrEvt && !isReceived -> 0x01
@@ -267,12 +321,11 @@ object BtSnoopParser {
                 else -> 0x02
             }
         }
-        val off = if (hasH4Prefix) 1 else 0
 
         return when (h4Type) {
-            0x01 -> decodeHciCommand(index, timestampMillis, direction, payload, off, origLen, hex)
-            0x04 -> decodeHciEvent(index, timestampMillis, direction, payload, off, origLen, hex)
-            0x02 -> decodeAclL2capAtt(index, timestampMillis, direction, payload, off, origLen, hex)
+            0x01 -> decodeHciCommand(index, timestampMillis, direction, cursor, origLen, hex)
+            0x04 -> decodeHciEvent(index, timestampMillis, direction, cursor, origLen, hex)
+            0x02 -> decodeAclL2capAtt(index, timestampMillis, direction, cursor, origLen, hex)
             0x03 -> HciParsedFrame(
                 index, timestampMillis, direction, HciPacketLayer.HCI_SCO,
                 "HCI SCO Audio Frame", "Length=$origLen bytes", origLen, hex
@@ -288,18 +341,16 @@ object BtSnoopParser {
         index: Int,
         ts: Long,
         dir: String,
-        p: ByteArray,
-        off: Int,
+        cursor: SafeByteCursor,
         origLen: Int,
         hex: String
     ): HciParsedFrame {
-        if (p.size < off + 3) {
-            return HciParsedFrame(index, ts, dir, HciPacketLayer.HCI_CMD, "Truncated HCI Command", "", origLen, hex)
-        }
-        val opcode = (p[off].toInt() and 0xFF) or ((p[off + 1].toInt() and 0xFF) shl 8)
+        val opcode = cursor.readU16LE()
+            ?: return HciParsedFrame(index, ts, dir, HciPacketLayer.HCI_CMD, "Truncated HCI Command", "", origLen, hex)
+        val paramLen = cursor.readU8()
+            ?: return HciParsedFrame(index, ts, dir, HciPacketLayer.HCI_CMD, "Truncated HCI Command", "", origLen, hex)
         val ogf = (opcode ushr 10) and 0x3F
         val ocf = opcode and 0x3FF
-        val paramLen = p[off + 2].toInt() and 0xFF
         val name = when (opcode) {
             0x0C03 -> "HCI_Reset"
             0x200B -> "LE_Set_Scan_Parameters"
@@ -322,16 +373,17 @@ object BtSnoopParser {
         index: Int,
         ts: Long,
         dir: String,
-        p: ByteArray,
-        off: Int,
+        cursor: SafeByteCursor,
         origLen: Int,
         hex: String
     ): HciParsedFrame {
-        if (p.size < off + 2) {
-            return HciParsedFrame(index, ts, dir, HciPacketLayer.HCI_EVT, "Truncated HCI Event", "", origLen, hex)
-        }
-        val evtCode = p[off].toInt() and 0xFF
-        val paramLen = p[off + 1].toInt() and 0xFF
+        val evtCode = cursor.readU8()
+            ?: return HciParsedFrame(index, ts, dir, HciPacketLayer.HCI_EVT, "Truncated HCI Event", "", origLen, hex)
+        val paramLen = cursor.readU8()
+            ?: return HciParsedFrame(index, ts, dir, HciPacketLayer.HCI_EVT, "Truncated HCI Event", "", origLen, hex)
+        val paramCursor = cursor.slice(minOf(paramLen, cursor.remaining))
+
+        var extraDetail = ""
         val eventName = when (evtCode) {
             0x0E -> "Command Complete"
             0x0F -> "Command Status"
@@ -339,12 +391,17 @@ object BtSnoopParser {
             0x08 -> "Encryption Change"
             0x13 -> "Number Of Completed Packets"
             0x3E -> {
-                val sub = if (p.size > off + 2) p[off + 2].toInt() and 0xFF else -1
+                val sub = paramCursor?.readU8() ?: -1
                 when (sub) {
                     0x01 -> "LE Connection Complete"
-                    0x02 -> "LE Advertising Report"
+                    0x02 -> {
+                        // Parse first BLE Advertising Report AD TLV structures safely
+                        val adCount = parseLeAdvReportAdCount(paramCursor)
+                        if (adCount > 0) extraDetail = " AD_Structures=$adCount"
+                        "LE Advertising Report"
+                    }
                     0x0D -> "LE Extended Advertising Report"
-                    else -> "LE Meta Event (sub=0x${"%02X".format(sub)})"
+                    else -> "LE Meta Event (sub=0x${"%02X".format(sub and 0xFF)})"
                 }
             }
             else -> "HCI Event 0x${"%02X".format(evtCode)}"
@@ -352,36 +409,45 @@ object BtSnoopParser {
         return HciParsedFrame(
             index, ts, dir, HciPacketLayer.HCI_EVT,
             eventName,
-            "Event=0x${"%02X".format(evtCode)} ParamLen=$paramLen",
+            "Event=0x${"%02X".format(evtCode)} ParamLen=$paramLen$extraDetail",
             origLen, hex
         )
+    }
+
+    private fun parseLeAdvReportAdCount(paramCursor: SafeByteCursor?): Int {
+        if (paramCursor == null) return 0
+        val numReports = paramCursor.readU8() ?: return 0
+        if (numReports <= 0) return 0
+        // EventType(1) + AddrType(1) + Addr(6)
+        if (!paramCursor.skip(8)) return 0
+        val dataLen = paramCursor.readU8() ?: return 0
+        val adBytes = paramCursor.readBytes(dataLen, 64) ?: return 0
+        return BleAdParser.parseAdStructures(adBytes).size
     }
 
     private fun decodeAclL2capAtt(
         index: Int,
         ts: Long,
         dir: String,
-        p: ByteArray,
-        off: Int,
+        cursor: SafeByteCursor,
         origLen: Int,
         hex: String
     ): HciParsedFrame {
         // ACL Header (4 bytes) + L2CAP Header (4 bytes)
-        if (p.size < off + 8) {
+        if (cursor.remaining < 8) {
             return HciParsedFrame(index, ts, dir, HciPacketLayer.L2CAP, "HCI ACL Fragment", "Len=$origLen", origLen, hex)
         }
-        val handleFlags = (p[off].toInt() and 0xFF) or ((p[off + 1].toInt() and 0xFF) shl 8)
+        val handleFlags = cursor.readU16LE() ?: return HciParsedFrame(index, ts, dir, HciPacketLayer.L2CAP, "HCI ACL Fragment", "Len=$origLen", origLen, hex)
+        cursor.readU16LE() ?: return HciParsedFrame(index, ts, dir, HciPacketLayer.L2CAP, "HCI ACL Fragment", "Len=$origLen", origLen, hex) // ACL data total len
         val connHandle = handleFlags and 0x0FFF
-        val l2capLen = (p[off + 4].toInt() and 0xFF) or ((p[off + 5].toInt() and 0xFF) shl 8)
-        val cid = (p[off + 6].toInt() and 0xFF) or ((p[off + 7].toInt() and 0xFF) shl 8)
-        val l2PayloadOff = off + 8
+        val l2capLen = cursor.readU16LE() ?: return HciParsedFrame(index, ts, dir, HciPacketLayer.L2CAP, "HCI ACL Fragment", "Len=$origLen", origLen, hex)
+        val cid = cursor.readU16LE() ?: return HciParsedFrame(index, ts, dir, HciPacketLayer.L2CAP, "HCI ACL Fragment", "Len=$origLen", origLen, hex)
+        val l2Payload = cursor.slice(minOf(l2capLen, cursor.remaining)) ?: return HciParsedFrame(index, ts, dir, HciPacketLayer.L2CAP, "HCI ACL Fragment", "Len=$origLen", origLen, hex)
 
         return when (cid) {
             0x0004 -> { // ATT / GATT
-                val attOpcode = if (p.size > l2PayloadOff) p[l2PayloadOff].toInt() and 0xFF else -1
-                val attHandle = if (p.size >= l2PayloadOff + 3) {
-                    (p[l2PayloadOff + 1].toInt() and 0xFF) or ((p[l2PayloadOff + 2].toInt() and 0xFF) shl 8)
-                } else null
+                val attOpcode = l2Payload.readU8() ?: -1
+                val attHandle = if (l2Payload.remaining >= 2) l2Payload.readU16LE() else null
                 val opName = when (attOpcode) {
                     0x01 -> "ATT Error Response"
                     0x02 -> "ATT Exchange MTU Req"
@@ -398,7 +464,7 @@ object BtSnoopParser {
                     0x1B -> "GATT Handle Value Notification"
                     0x1D -> "GATT Handle Value Indication"
                     0x52 -> "GATT Write Command"
-                    else -> "ATT Opcode 0x${"%02X".format(attOpcode)}"
+                    else -> "ATT Opcode 0x${"%02X".format(attOpcode and 0xFF)}"
                 }
                 val handleStr = attHandle?.let { " Handle=0x${"%04X".format(it)}" } ?: ""
                 HciParsedFrame(
