@@ -96,6 +96,7 @@ class BleThreatMonitor(private val context: Context) {
 
     private val sightings = ConcurrentHashMap<String, BleDeviceSighting>()
     private val recentFloodEvents = ArrayDeque<Pair<Long, String>>() // timestamp -> address
+    private val floodMacCounts = HashMap<String, Int>()
     private val recentAllPackets = ArrayDeque<Long>()
     private val lock = Any()
 
@@ -197,6 +198,7 @@ class BleThreatMonitor(private val context: Context) {
         synchronized(lock) {
             sightings.clear()
             recentFloodEvents.clear()
+            floodMacCounts.clear()
             recentAllPackets.clear()
         }
         _snapshot.value = _snapshot.value.copy(
@@ -289,11 +291,18 @@ class BleThreatMonitor(private val context: Context) {
 
             if (isSpamCandidate) {
                 recentFloodEvents.addLast(now to address)
+                floodMacCounts[address] = (floodMacCounts[address] ?: 0) + 1
             }
             while (recentFloodEvents.isNotEmpty() && (now - recentFloodEvents.first().first > 5000L || recentFloodEvents.size > MAX_RECENT_FLOOD_EVENTS)) {
-                recentFloodEvents.removeFirst()
+                val evicted = recentFloodEvents.removeFirst()
+                val remaining = (floodMacCounts[evicted.second] ?: 1) - 1
+                if (remaining <= 0) {
+                    floodMacCounts.remove(evicted.second)
+                } else {
+                    floodMacCounts[evicted.second] = remaining
+                }
             }
-            val uniqueFloodMacs = recentFloodEvents.map { it.second }.toSet().size
+            val uniqueFloodMacs = floodMacCounts.size
             if (recentFloodEvents.size >= 25 && uniqueFloodMacs >= 6) {
                 spamActive = true
                 spamSummary = "BLE Advertising Spam Flood detected (${recentFloodEvents.size} frames / $uniqueFloodMacs rotating MACs in 5s — Flipper Zero / Continuity / Fast Pair signature)"
