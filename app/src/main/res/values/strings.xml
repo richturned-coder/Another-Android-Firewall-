@@ -16,8 +16,6 @@
     <string name="vpn_status_starting">INITIALIZING TUN</string>
     <string name="action_arm_vpn">Arm VPN Firewall</string>
     <string name="action_disarm_vpn">Disarm Firewall</string>
-    <string name="action_start_pcap">Start PCAPNG</string>
-    <string name="action_stop_pcap">Stop PCAPNG</string>
     <string name="tab_live_stream">Live Stream</string>
     <string name="tab_app_rules">Per-App</string>
     <string name="tab_custom_rules">IP / Port / Host</string>
@@ -57,7 +55,6 @@
     <string name="rf_title">RF SPECTRUM</string>
     <string name="action_scan_usb">Scan USB-OTG</string>
     <string name="action_load_cu8">Load .cu8 I/Q</string>
-    <string name="action_start_sdr">Stream SDR</string>
     <string name="action_stop_sdr">Stop SDR</string>
     <string name="empty_rf_title">No SDR Stream Active</string>
     <string name="empty_rf_subtitle">Attach an RTL-SDR (RTL2832U) or HackRF via USB-C OTG, or load a raw .cu8 I/Q file for Radix-2 FFT waterfall and modulation analysis.</string>
@@ -74,7 +71,5 @@
     <!-- Content Descriptions -->
     <string name="cd_vpn_shield">Toggle local VPN firewall shield</string>
     <string name="cd_pcap_record">Toggle simultaneous PCAPNG recording</string>
-    <string name="cd_back">Navigate back</string>
     <string name="cd_search">Search entries</string>
-    <string name="cd_close">Close sheet</string>
 </resources>

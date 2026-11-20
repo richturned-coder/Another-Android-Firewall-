@@ -11,7 +11,6 @@ import android.net.ConnectivityManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
-import android.os.Process
 import android.system.OsConstants
 import androidx.core.app.NotificationCompat
 import com.example.FirewallApplication
@@ -59,6 +58,7 @@ class FirewallVpnService : VpnService() {
         private const val VPN_MTU = 1500
         private const val VPN_IPV4_ADDRESS = "10.215.0.1"
         private const val VPN_IPV6_ADDRESS = "fd00:10:215::1"
+        private const val INVALID_UID = -1
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -367,18 +367,18 @@ class FirewallVpnService : VpnService() {
     }
 
     private fun resolveOwnerUid(cm: ConnectivityManager, packet: ParsedPacket): Int {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return Process.INVALID_UID
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return INVALID_UID
         val osProto = when (packet.protocol) {
             TransportProtocol.TCP -> OsConstants.IPPROTO_TCP
             TransportProtocol.UDP -> OsConstants.IPPROTO_UDP
-            else -> return Process.INVALID_UID
+            else -> return INVALID_UID
         }
         return try {
             val local = InetSocketAddress(InetAddress.getByAddress(packet.srcIpBytes), packet.srcPort)
             val remote = InetSocketAddress(InetAddress.getByAddress(packet.dstIpBytes), packet.dstPort)
             cm.getConnectionOwnerUid(osProto, local, remote)
         } catch (_: Exception) {
-            Process.INVALID_UID
+            INVALID_UID
         }
     }
 

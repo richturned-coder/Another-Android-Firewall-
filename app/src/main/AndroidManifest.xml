@@ -62,7 +62,6 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="@string/app_name"
             android:launchMode="singleTop"
             android:theme="@style/Theme.AnotherDroidFirewall">
             <intent-filter>

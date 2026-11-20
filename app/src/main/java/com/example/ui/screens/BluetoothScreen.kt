@@ -28,7 +28,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BluetoothSearching
+import androidx.compose.material.icons.automirrored.filled.BluetoothSearching
 import androidx.compose.material.icons.filled.Cable
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileOpen
@@ -230,7 +230,7 @@ fun BluetoothScreen(
                         )
                     ) {
                         Icon(
-                            if (ble.isScanning) Icons.Default.Stop else Icons.Default.BluetoothSearching,
+                            if (ble.isScanning) Icons.Default.Stop else Icons.AutoMirrored.Filled.BluetoothSearching,
                             contentDescription = null,
                             modifier = Modifier.size(18.dp)
                         )
@@ -249,13 +249,14 @@ fun BluetoothScreen(
                 }
             }
 
-            if (ble.spamAlertActive && ble.spamSummary != null) {
+            val spamSummary = ble.spamSummary
+            if (ble.spamAlertActive && spamSummary != null) {
                 item(key = "ble_spam_banner") {
                     TacticalPanel(accentColor = MaterialTheme.colorScheme.error) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Icon(Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error)
                             Text(
-                                text = ble.spamSummary!!,
+                                text = spamSummary,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.error
                             )
