@@ -45,6 +45,8 @@ jqwik = "1.9.2"
 jazzerJunit = "0.24.0"
 junitJupiter = "5.11.4"
 junitPlatform = "1.11.4"
+sqlcipherAndroid = "4.20.0"
+tinkAndroid = "1.24.0"
 
 
 [libraries]
@@ -88,7 +90,10 @@ logging-interceptor = { group = "com.squareup.okhttp3", name = "logging-intercep
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 moshi-kotlin = { group = "com.squareup.moshi", name = "moshi-kotlin", version.ref = "moshiKotlin" }
 moshi-kotlin-codegen = { group = "com.squareup.moshi", name = "moshi-kotlin-codegen", version.ref = "moshiKotlinCodegen" }
+androidx-datastore = { group = "androidx.datastore", name = "datastore", version.ref = "datastorePreferences" }
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastorePreferences" }
+sqlcipher-android = { group = "net.zetetic", name = "sqlcipher-android", version.ref = "sqlcipherAndroid" }
+tink-android = { group = "com.google.crypto.tink", name = "tink-android", version.ref = "tinkAndroid" }
 robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
 firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
 firebase-ai = { group = "com.google.firebase", name = "firebase-ai" }

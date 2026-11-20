@@ -24,3 +24,7 @@
 # Keep USB-OTG & Bluetooth/RF data models and reflection-safe enums
 -keep enum org.aafw.firewall.engine.** { *; }
 -keep enum org.aafw.firewall.vpn.** { *; }
+
+# Keep SQLCipher JNI callbacks and native database classes
+-keep class net.zetetic.** { *; }
+-keep class net.zetetic.database.sqlcipher.** { *; }

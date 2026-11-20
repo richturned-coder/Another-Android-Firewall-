@@ -62,6 +62,16 @@ class PcapngWriter(
     ): Boolean {
         if (!active.compareAndSet(false, true)) return false
         outputFile.parentFile?.mkdirs()
+        runCatching {
+            if (!outputFile.exists()) {
+                outputFile.createNewFile()
+            }
+            outputFile.setReadable(false, false)
+            outputFile.setWritable(false, false)
+            outputFile.setExecutable(false, false)
+            outputFile.setReadable(true, true)
+            outputFile.setWritable(true, true)
+        }
         currentFile = outputFile
         currentSessionId = sessionId
         packetsWritten.set(0L)

@@ -241,4 +241,68 @@ class SecurityEnginesUnitTest {
         assertEquals("Wireguard", AppLabelResolver.resolveFromPackageName("com.wireguard.android"))
         assertEquals("Net Guard", AppLabelResolver.resolveFromPackageName("org.vendor.netGuard"))
     }
+
+    @Test
+    fun encryptedAppSettingsSerializerRoundTripsAndRejectsTamperingAndWrongKey() = runTest {
+        val aeadA = org.aafw.firewall.data.crypto.TinkKeystoreProvider.createInMemoryForTest()
+        val aeadB = org.aafw.firewall.data.crypto.TinkKeystoreProvider.createInMemoryForTest()
+        val serializerA = org.aafw.firewall.data.local.EncryptedAppSettingsSerializer(aeadA)
+        val serializerB = org.aafw.firewall.data.local.EncryptedAppSettingsSerializer(aeadB)
+
+        val custom = org.aafw.firewall.data.local.AppSettings(
+            defaultBlockAllMode = true,
+            autoRecordPcapOnVpnStart = true,
+            idsDnsPhishingEnabled = false,
+            idsHeuristicsEnabled = false,
+            idsBehavioralScanEnabled = false,
+            idsHttpDpiEnabled = false,
+            irLuminanceThreshold = 190,
+            irChromaBiasThreshold = 0.42f,
+            irUseFrontCamera = false,
+            rfCenterFreqMhz = 915.25,
+            rfSampleRateHz = 1_024_000,
+            rfPeakThresholdDb = 14.5f
+        )
+
+        val out1 = ByteArrayOutputStream()
+        serializerA.writeTo(custom, out1)
+        val cipher1 = out1.toByteArray()
+
+        val out2 = ByteArrayOutputStream()
+        serializerA.writeTo(custom, out2)
+        val cipher2 = out2.toByteArray()
+
+        assertTrue("Ciphertext should not be empty", cipher1.isNotEmpty())
+        assertFalse("Ciphertext must not contain plaintext ADFS header", String(cipher1, Charsets.ISO_8859_1).contains("ADFS"))
+        assertFalse("AES-GCM nonces must produce distinct ciphertexts", cipher1.contentEquals(cipher2))
+
+        val decoded = serializerA.readFrom(ByteArrayInputStream(cipher1))
+        assertEquals(custom, decoded)
+
+        // Empty stream safely returns defaults
+        assertEquals(
+            org.aafw.firewall.data.local.AppSettings(),
+            serializerA.readFrom(ByteArrayInputStream(ByteArray(0)))
+        )
+
+        // Single-bit ciphertext tampering must fail authentication with CorruptionException
+        val tampered = cipher1.copyOf()
+        tampered[tampered.lastIndex] = (tampered.last().toInt() xor 0xFF).toByte()
+        var tamperFailed = false
+        try {
+            serializerA.readFrom(ByteArrayInputStream(tampered))
+        } catch (_: androidx.datastore.core.CorruptionException) {
+            tamperFailed = true
+        }
+        assertTrue("Tampered ciphertext must raise CorruptionException", tamperFailed)
+
+        // Decryption with an unrelated Tink key must fail with CorruptionException
+        var wrongKeyFailed = false
+        try {
+            serializerB.readFrom(ByteArrayInputStream(cipher1))
+        } catch (_: androidx.datastore.core.CorruptionException) {
+            wrongKeyFailed = true
+        }
+        assertTrue("Wrong key decryption must raise CorruptionException", wrongKeyFailed)
+    }
 }

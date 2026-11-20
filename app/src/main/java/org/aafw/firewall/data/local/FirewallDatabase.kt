@@ -4,6 +4,10 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
+import org.aafw.firewall.data.crypto.DatabaseKeyManager
+import org.aafw.firewall.data.crypto.TinkKeystoreProvider
+import java.util.Arrays
 
 @Database(
     entities = [
@@ -29,11 +33,39 @@ abstract class FirewallDatabase : RoomDatabase() {
 
         fun getInstance(context: Context): FirewallDatabase {
             return instance ?: synchronized(this) {
-                instance ?: Room.databaseBuilder(
-                    context.applicationContext,
+                instance ?: buildEncryptedDatabase(context.applicationContext).also { instance = it }
+            }
+        }
+
+        private fun buildEncryptedDatabase(appContext: Context): FirewallDatabase {
+            // Wipe legacy unencrypted Room SQLite files so historical plaintext telemetry does not linger.
+            DatabaseKeyManager.scrubLegacyPlaintextDatabase(appContext)
+
+            val passphrase = DatabaseKeyManager.getOrCreatePassphrase(appContext)
+            return try {
+                System.loadLibrary("sqlcipher")
+                // Note: Do NOT zero `passphrase` here — SupportOpenHelperFactory holds the reference
+                // until Room lazily opens the database and clears it internally.
+                val factory = SupportOpenHelperFactory(passphrase)
+                Room.databaseBuilder(
+                    appContext,
                     FirewallDatabase::class.java,
-                    "another_droid_firewall.db"
-                ).build().also { instance = it }
+                    DatabaseKeyManager.ENCRYPTED_DB_NAME
+                )
+                    .openHelperFactory(factory)
+                    .build()
+            } catch (e: UnsatisfiedLinkError) {
+                Arrays.fill(passphrase, 0)
+                // Only fall back to host SQLite under Robolectric JVM tests where Android ABIs
+                // for libsqlcipher.so cannot load. Real Android devices always fail closed.
+                if (!TinkKeystoreProvider.isRobolectricHost()) {
+                    throw e
+                }
+                Room.databaseBuilder(
+                    appContext,
+                    FirewallDatabase::class.java,
+                    "another_droid_firewall_robolectric.db"
+                ).build()
             }
         }
     }
