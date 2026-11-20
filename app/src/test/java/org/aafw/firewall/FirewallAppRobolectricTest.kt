@@ -80,17 +80,18 @@ class FirewallAppRobolectricTest {
     fun databaseKeyManagerWrapsReloadsRecoversAndScrubsLegacyPlaintextDb() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val aead = TinkKeystoreProvider.createInMemoryForTest()
+        val testKeyFileName = "test_room_db_key_v1.enc"
 
-        val key1 = DatabaseKeyManager.getOrCreatePassphrase(context, aead)
+        val key1 = DatabaseKeyManager.getOrCreatePassphrase(context, aead, keyFileName = testKeyFileName)
         assertEquals(32, key1.size)
 
-        val keyFile = File(File(context.filesDir, "crypto"), "room_db_key_v1.enc")
+        val keyFile = File(File(context.filesDir, "crypto"), testKeyFileName)
         assertTrue("Wrapped key file must exist", keyFile.exists())
         val wrappedBytes = keyFile.readBytes()
         assertTrue("Wrapped key ciphertext must be larger than raw key", wrappedBytes.size > key1.size)
         assertFalse("Wrapped key file must not equal raw passphrase", wrappedBytes.contentEquals(key1))
 
-        val key2 = DatabaseKeyManager.getOrCreatePassphrase(context, aead)
+        val key2 = DatabaseKeyManager.getOrCreatePassphrase(context, aead, keyFileName = testKeyFileName)
         assertTrue("Subsequent retrieval must return identical unwrapped passphrase", key1.contentEquals(key2))
 
         // Simulate corrupted key blob + stale encrypted DB: must wipe undecryptable DB and rotate cleanly
@@ -99,7 +100,7 @@ class FirewallAppRobolectricTest {
         staleEncDb.writeBytes(byteArrayOf(1, 2, 3, 4))
         keyFile.writeBytes(byteArrayOf(0x00, 0x11, 0x22, 0x33, 0x44))
 
-        val key3 = DatabaseKeyManager.getOrCreatePassphrase(context, aead)
+        val key3 = DatabaseKeyManager.getOrCreatePassphrase(context, aead, keyFileName = testKeyFileName)
         assertEquals(32, key3.size)
         assertFalse("Recovered passphrase must be freshly generated", key1.contentEquals(key3))
         assertFalse("Undecryptable DB file must be wiped on key corruption", staleEncDb.exists())

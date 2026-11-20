@@ -58,6 +58,24 @@ jobs:
       - name: Run unit, property, and fuzz regression tests
         run: ./gradlew :app:testDebugUnitTest --stacktrace
 
+      - name: Annotate unit test failures
+        if: failure()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          for path in sorted(glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml")):
+              root = ET.parse(path).getroot()
+              for tc in root.findall("testcase"):
+                  for tag in ("failure", "error"):
+                      el = tc.find(tag)
+                      if el is not None:
+                          cls = tc.attrib.get("classname", "")
+                          name = tc.attrib.get("name", "")
+                          msg = (el.attrib.get("message") or (el.text or "")).strip().replace("\n", " | ")[:400]
+                          print(f"::error title={cls}.{name}::{msg}")
+          PY
+
       - name: Run Android Lint
         run: ./gradlew :app:lintDebug --stacktrace
 

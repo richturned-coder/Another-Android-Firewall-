@@ -24,14 +24,15 @@ object DatabaseKeyManager {
 
     fun getOrCreatePassphrase(
         context: Context,
-        aead: AeadCipher = TinkKeystoreProvider.getOrCreateAead(context)
+        aead: AeadCipher = TinkKeystoreProvider.getOrCreateAead(context),
+        keyFileName: String = KEY_FILE_NAME
     ): ByteArray = synchronized(lock) {
         val appContext = context.applicationContext
         val cryptoDir = File(appContext.filesDir, CRYPTO_DIR_NAME).apply {
             mkdirs()
             enforceOwnerOnlyDir(this)
         }
-        val keyFile = File(cryptoDir, KEY_FILE_NAME)
+        val keyFile = File(cryptoDir, keyFileName)
 
         if (keyFile.exists() && keyFile.length() > 0L) {
             try {
@@ -56,7 +57,7 @@ object DatabaseKeyManager {
         secureRandom.nextBytes(rawPassphrase)
         val encrypted = aead.encrypt(rawPassphrase, DB_KEY_AAD)
 
-        val tempFile = File(cryptoDir, "$KEY_FILE_NAME.tmp")
+        val tempFile = File(cryptoDir, "$keyFileName.tmp")
         try {
             if (!tempFile.exists()) {
                 tempFile.createNewFile()

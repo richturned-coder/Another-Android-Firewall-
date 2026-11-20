@@ -230,7 +230,15 @@ class PreferencesRepository internal constructor(
             return File(dir, ENCRYPTED_SETTINGS_FILE)
         }
 
+        internal fun scrubLegacyPlaintextPreferences(appContext: Context) {
+            val legacyFile = File(File(appContext.filesDir, DATASTORE_DIR_NAME), LEGACY_PLAINTEXT_PREFS_FILE)
+            if (legacyFile.exists()) {
+                DatabaseKeyManager.wipeAndDeleteFile(legacyFile)
+            }
+        }
+
         private fun getOrCreateSharedDataStore(appContext: Context): DataStore<AppSettings> {
+            scrubLegacyPlaintextPreferences(appContext)
             val targetFile = encryptedSettingsFile(appContext)
             val canonicalPath = targetFile.canonicalPath
             if (cachedStorePath == canonicalPath) {
@@ -239,11 +247,6 @@ class PreferencesRepository internal constructor(
             return synchronized(storeLock) {
                 if (cachedStorePath == canonicalPath) {
                     cachedDataStore?.let { return@synchronized it }
-                }
-                // Scrub any legacy plaintext Preferences DataStore file.
-                val legacyFile = File(targetFile.parentFile, LEGACY_PLAINTEXT_PREFS_FILE)
-                if (legacyFile.exists()) {
-                    DatabaseKeyManager.wipeAndDeleteFile(legacyFile)
                 }
                 if (targetFile.exists()) {
                     DatabaseKeyManager.enforceOwnerOnlyFile(targetFile)

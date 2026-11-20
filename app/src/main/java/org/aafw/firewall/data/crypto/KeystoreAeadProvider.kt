@@ -58,7 +58,7 @@ object TinkKeystoreProvider {
     }
 
     internal fun isRobolectricHost(): Boolean =
-        Build.FINGERPRINT.equals("robolectric", ignoreCase = true)
+        Build.FINGERPRINT?.contains("robolectric", ignoreCase = true) == true
 
     /**
      * Returns a process-wide Tink AES-256-GCM [AeadCipher] wrapped by Android Keystore.
