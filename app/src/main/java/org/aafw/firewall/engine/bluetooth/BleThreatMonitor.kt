@@ -277,12 +277,6 @@ class BleThreatMonitor(private val context: Context) {
                 rawAdvHex = rawBytes.take(31).joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
             )
 
-            sightings[address] = updated
-            if (sightings.size > MAX_SIGHTINGS) {
-                val oldestKey = sightings.entries.minByOrNull { it.value.lastSeenAt }?.key
-                if (oldestKey != null) sightings.remove(oldestKey)
-            }
-
             recentAllPackets.addLast(now)
             while (recentAllPackets.isNotEmpty() && (now - recentAllPackets.first() > 1000L || recentAllPackets.size > MAX_RECENT_PACKETS)) {
                 recentAllPackets.removeFirst()
@@ -303,13 +297,21 @@ class BleThreatMonitor(private val context: Context) {
                 }
             }
             val uniqueFloodMacs = floodMacCounts.size
-            if (recentFloodEvents.size >= 25 && uniqueFloodMacs >= 6) {
+            val finalSighting = if (recentFloodEvents.size >= 25 && uniqueFloodMacs >= 6) {
                 spamActive = true
                 spamSummary = "BLE Advertising Spam Flood detected (${recentFloodEvents.size} frames / $uniqueFloodMacs rotating MACs in 5s — Flipper Zero / Continuity / Fast Pair signature)"
-                sightings[address] = updated.copy(
+                updated.copy(
                     threatClass = BleThreatClass.BLE_SPAM_FLOOD,
                     threatNote = "Part of rotating-MAC BLE advertising flood"
                 )
+            } else {
+                updated
+            }
+
+            sightings[address] = finalSighting
+            while (sightings.size > MAX_SIGHTINGS) {
+                val oldestKey = sightings.entries.minByOrNull { it.value.lastSeenAt }?.key ?: break
+                sightings.remove(oldestKey)
             }
 
             sorted = sightings.values.sortedWith(
