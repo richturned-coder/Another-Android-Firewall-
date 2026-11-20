@@ -1,0 +1,80 @@
+version: 2
+
+updates:
+  # 1. GitHub Actions (.github/workflows/*.yml)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci(deps)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "ci"
+      - "security"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # 2. Gradle (root build.gradle.kts, app/build.gradle.kts, gradle/libs.versions.toml)
+  - package-ecosystem: "gradle"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    open-pull-requests-limit: 8
+    commit-message:
+      prefix: "build(deps)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "android"
+    groups:
+      # Keep Kotlin, KSP, and Coroutines aligned to avoid compiler/plugin mismatches
+      kotlin-toolchain:
+        patterns:
+          - "org.jetbrains.kotlin*"
+          - "org.jetbrains.kotlinx*"
+          - "com.google.devtools.ksp*"
+      # Group AndroidX & Jetpack Compose minor/patch updates together
+      androidx-compose:
+        patterns:
+          - "androidx.*"
+          - "com.google.android.material*"
+        update-types:
+          - "minor"
+          - "patch"
+      # Group unit, Robolectric, property, and fuzzing test deps separately
+      testing-and-fuzzing:
+        dependency-type: "development"
+        patterns:
+          - "junit*"
+          - "org.junit*"
+          - "org.robolectric*"
+          - "net.jqwik*"
+          - "com.code-intelligence*"
+          - "io.kotest*"
+        update-types:
+          - "minor"
+          - "patch"
+    # Keep Android Gradle Plugin (AGP) major upgrades manual so breaking changes don't break CI
+    ignore:
+      - dependency-name: "com.android.tools.build:*"
+        update-types:
+          - "version-update:semver-major"
