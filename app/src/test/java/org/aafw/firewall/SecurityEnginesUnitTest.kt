@@ -241,4 +241,110 @@ class SecurityEnginesUnitTest {
         assertEquals("Wireguard", AppLabelResolver.resolveFromPackageName("com.wireguard.android"))
         assertEquals("Net Guard", AppLabelResolver.resolveFromPackageName("org.vendor.netGuard"))
     }
+
+    @Test
+    fun firewallRuleEngineFailsClosedUntilRulesLoadedAndOnMalformedPackets() {
+        val engine = FirewallRuleEngine(failClosedUntilRulesLoaded = true)
+        val validRaw = PacketParser.buildIpv4TcpPacket(
+            srcIp = byteArrayOf(10, 215.toByte(), 0, 1),
+            dstIp = byteArrayOf(1, 1, 1, 1),
+            srcPort = 52000,
+            dstPort = 443,
+            seq = 1L,
+            ack = 0L,
+            flags = 0x02
+        )
+        val validPacket = PacketParser.parse(validRaw, validRaw.size)!!
+
+        // Before updateRules(), fail-closed guard must drop all packets
+        assertFalse(engine.isRulesLoaded())
+        val preLoadVerdict = engine.evaluate(validPacket, 10123)
+        assertFalse(preLoadVerdict.allowed)
+        assertTrue(preLoadVerdict.reason.contains("fail-closed", ignoreCase = true))
+
+        // After rules load in denylist mode, valid traffic is allowed...
+        engine.updateRules(emptyList(), defaultBlockAll = false)
+        assertTrue(engine.isRulesLoaded())
+        assertTrue(engine.evaluate(validPacket, 10123).allowed)
+
+        // ...but malformed packets must STILL fail closed
+        val malformedPacket = validPacket.copy(isMalformed = true, malformedReason = "truncated header")
+        val malformedVerdict = engine.evaluate(malformedPacket, 10123)
+        assertFalse(malformedVerdict.allowed)
+        assertTrue(malformedVerdict.reason.contains("Malformed", ignoreCase = true))
+
+        // In allowlist mode, unattributed UID (-1) must fail closed
+        engine.updateRules(emptyList(), defaultBlockAll = true)
+        val unattributedVerdict = engine.evaluate(validPacket, -1)
+        assertFalse(unattributedVerdict.allowed)
+        assertTrue(unattributedVerdict.reason.contains("Unattributed", ignoreCase = true))
+    }
+
+    @Test
+    fun radix2FftEngineRejectsInvalidSizesAndClampsHostileInputs() {
+        for (invalidSize in listOf(0, -16, 32, 1000, 32_768)) {
+            val threw = try {
+                Radix2FftEngine(invalidSize)
+                false
+            } catch (_: IllegalArgumentException) {
+                true
+            }
+            assertTrue("Expected IllegalArgumentException for fftSize=$invalidSize", threw)
+        }
+
+        val fft = Radix2FftEngine(256)
+        val smallBuf = ByteArray(16) { 0x7F }
+        val frameOversizedLen = fft.processCu8Block(
+            iqBytes = smallBuf,
+            byteLength = 999_999,
+            centerFreqMhz = Double.NaN,
+            sampleRateHz = 0,
+            peakThresholdDb = Float.POSITIVE_INFINITY
+        ) { "Unknown" to "Unknown" }
+        assertEquals(256, frameOversizedLen.binsDb.size)
+        assertEquals(0.0, frameOversizedLen.centerFreqMhz, 0.0)
+        assertEquals(1, frameOversizedLen.sampleRateHz)
+
+        val frameNegLen = fft.processCu8Block(
+            iqBytes = smallBuf,
+            byteLength = -42,
+            centerFreqMhz = 433.92,
+            sampleRateHz = -500,
+            peakThresholdDb = Float.NaN
+        ) { "ISM" to "OOK" }
+        assertEquals(256, frameNegLen.binsDb.size)
+    }
+
+    @Test
+    fun pcapngWriterEnforcesMaxFileSizeCapAndClampsInvalidLengths() = runTest {
+        val tempFile = File.createTempFile("adf_cap_test_", ".pcapng")
+        try {
+            val writer = PcapngWriter(ringCapacity = 64, maxFileBytes = 1500L)
+            assertTrue(writer.start(tempFile, 2L, this) {})
+            val pkt = PacketParser.buildIpv4TcpPacket(
+                srcIp = byteArrayOf(10, 215.toByte(), 0, 1),
+                dstIp = byteArrayOf(8, 8, 8, 8),
+                srcPort = 54000,
+                dstPort = 443,
+                seq = 1L,
+                ack = 0L,
+                flags = 0x02
+            )
+            // Invalid negative length should be safely ignored; oversized length clamped to pkt.size
+            writer.offerPacket(pkt, -10, 10001, "NegApp", "ALLOW", null)
+            // One packet with oversized comment (2500 chars) should be truncated cleanly and fit under 1500B
+            val longHost = "a".repeat(2500) + ".example"
+            writer.offerPacket(pkt, pkt.size + 500, 10001, "CapApp", "ALLOW", longHost)
+            // Subsequent packets push past maxFileBytes (1500B) and must be dropped
+            repeat(10) {
+                writer.offerPacket(pkt, pkt.size, 10001, "CapApp", "ALLOW", longHost)
+            }
+            val finalStats = writer.stop()
+            assertEquals(1L, finalStats.packetsWritten)
+            assertTrue("Expected bytesWritten <= 1500, got ${finalStats.bytesWritten}", finalStats.bytesWritten <= 1500L)
+            assertTrue("Expected droppedFrames >= 10 after hitting maxFileBytes cap", finalStats.droppedFrames >= 10L)
+        } finally {
+            tempFile.delete()
+        }
+    }
 }

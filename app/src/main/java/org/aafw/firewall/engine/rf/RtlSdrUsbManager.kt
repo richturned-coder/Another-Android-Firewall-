@@ -73,9 +73,9 @@ class RtlSdrUsbManager(private val context: Context) {
     fun requestUsbPermission(device: UsbDevice) {
         val mgr = usbManager ?: return
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            PendingIntent.FLAG_MUTABLE
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         } else {
-            0
+            PendingIntent.FLAG_UPDATE_CURRENT
         }
         val permissionIntent = Intent(ACTION_USB_PERMISSION).setPackage(context.packageName)
         val pi = PendingIntent.getBroadcast(context, 0, permissionIntent, flags)
@@ -140,7 +140,7 @@ class RtlSdrUsbManager(private val context: Context) {
             val buffer = ByteArray(16_384)
             while (isActive) {
                 val read = conn.bulkTransfer(bulkIn, buffer, buffer.size, 500)
-                if (read > 0) {
+                if (read in 1..buffer.size) {
                     onIqBlock(buffer, read)
                 } else {
                     delay(15L)
@@ -172,7 +172,7 @@ class RtlSdrUsbManager(private val context: Context) {
                 onStatus("Analyzing offline .cu8 I/Q capture stream...")
                 while (isActive) {
                     val read = bis.read(chunk)
-                    if (read <= 0) break
+                    if (read !in 1..chunk.size) break
                     onIqBlock(chunk, read)
                     delay(65L) // ~15 FPS waterfall playback
                 }

@@ -36,8 +36,14 @@ data class PcapngStats(
  * backed by a bounded ring-buffer Channel (DROP_OLDEST) to prevent memory redlining.
  */
 class PcapngWriter(
-    private val ringCapacity: Int = 2048
+    private val ringCapacity: Int = 2048,
+    private val maxFileBytes: Long = DEFAULT_MAX_FILE_BYTES
 ) {
+    companion object {
+        const val DEFAULT_MAX_FILE_BYTES: Long = 100L * 1024L * 1024L // 100 MiB safety ceiling
+        private const val MAX_COMMENT_BYTES = 1024
+    }
+
     private val active = AtomicBoolean(false)
     private val packetsWritten = AtomicLong(0L)
     private val bytesWritten = AtomicLong(0L)
@@ -62,6 +68,11 @@ class PcapngWriter(
     ): Boolean {
         if (!active.compareAndSet(false, true)) return false
         outputFile.parentFile?.mkdirs()
+        // Pre-create and lock capture file to owner-only (0600) before writing packet data
+        if (!outputFile.exists()) {
+            runCatching { outputFile.createNewFile() }
+        }
+        enforceOwnerOnlyPermissions(outputFile)
         currentFile = outputFile
         currentSessionId = sessionId
         packetsWritten.set(0L)
@@ -77,6 +88,7 @@ class PcapngWriter(
 
         writerJob = scope.launch(Dispatchers.IO) {
             BufferedOutputStream(FileOutputStream(outputFile), 65_536).use { out ->
+                enforceOwnerOnlyPermissions(outputFile)
                 val shb = buildSectionHeaderBlock()
                 val idb = buildInterfaceDescriptionBlock()
                 out.write(shb)
@@ -88,6 +100,10 @@ class PcapngWriter(
                 var flushCounter = 0
                 for (frame in ch) {
                     val epb = buildEnhancedPacketBlock(frame)
+                    if (maxFileBytes > 0L && bytesWritten.get() + epb.size > maxFileBytes) {
+                        droppedFrames.incrementAndGet()
+                        continue
+                    }
                     out.write(epb)
                     val pktCount = packetsWritten.incrementAndGet()
                     bytesWritten.addAndGet(epb.size.toLong())
@@ -104,10 +120,22 @@ class PcapngWriter(
         return true
     }
 
+    private fun enforceOwnerOnlyPermissions(file: File) {
+        runCatching {
+            file.setReadable(false, false)
+            file.setWritable(false, false)
+            file.setExecutable(false, false)
+            file.setReadable(true, true)
+            file.setWritable(true, true)
+        }
+    }
+
     fun offerPacket(rawBytes: ByteArray, length: Int, uid: Int, appLabel: String, verdict: String, host: String?) {
         if (!active.get()) return
+        val safeLen = length.coerceIn(0, rawBytes.size)
+        if (safeLen == 0) return
         val ch = frameChannel ?: return
-        val copy = rawBytes.copyOf(length)
+        val copy = rawBytes.copyOf(safeLen)
         val comment = buildString {
             append("UID=").append(uid)
             append(";APP=").append(appLabel)
@@ -205,7 +233,12 @@ class PcapngWriter(
     private fun buildEnhancedPacketBlock(frame: PcapngFrame): ByteArray {
         val dataLen = frame.rawBytes.size
         val dataPadded = paddedLength(dataLen)
-        val commentBytes = frame.comment.toByteArray(Charsets.UTF_8)
+        val rawCommentBytes = frame.comment.toByteArray(Charsets.UTF_8)
+        val commentBytes = if (rawCommentBytes.size > MAX_COMMENT_BYTES) {
+            rawCommentBytes.copyOf(MAX_COMMENT_BYTES)
+        } else {
+            rawCommentBytes
+        }
         val commentPadded = paddedLength(commentBytes.size)
         // Header(28) + PacketData(dataPadded) + opt_comment(4 + commentPadded) + opt_endofopt(4) + Trailer(4)
         val totalLen = 28 + dataPadded + 4 + commentPadded + 4 + 4

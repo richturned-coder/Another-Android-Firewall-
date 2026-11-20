@@ -34,6 +34,17 @@ data class SpectrumFrame(
  * SNR peak detector, spectral modulation classifier, and OOK/ASK pulse-width burst analyzer.
  */
 class Radix2FftEngine(val fftSize: Int = 1024) {
+    companion object {
+        const val MIN_FFT_SIZE = 64
+        const val MAX_FFT_SIZE = 16_384
+    }
+
+    init {
+        require(fftSize in MIN_FFT_SIZE..MAX_FFT_SIZE && (fftSize and (fftSize - 1)) == 0) {
+            "fftSize must be a power of two in $MIN_FFT_SIZE..$MAX_FFT_SIZE (got $fftSize)"
+        }
+    }
+
     private val real = DoubleArray(fftSize)
     private val imag = DoubleArray(fftSize)
     private val window = DoubleArray(fftSize) { i ->
@@ -49,7 +60,12 @@ class Radix2FftEngine(val fftSize: Int = 1024) {
         peakThresholdDb: Float,
         bandLookup: (Double) -> Pair<String, String>
     ): SpectrumFrame {
-        val samplePairs = minOf(fftSize, byteLength / 2)
+        val safeByteLength = byteLength.coerceIn(0, iqBytes.size)
+        val safeSampleRateHz = sampleRateHz.coerceAtLeast(1)
+        val safeCenterFreqMhz = if (centerFreqMhz.isFinite()) centerFreqMhz else 0.0
+        val safeThresholdDb = if (peakThresholdDb.isFinite()) peakThresholdDb else 10f
+
+        val samplePairs = minOf(fftSize, safeByteLength / 2)
         // Convert unsigned 8-bit I/Q (0..255 centered at 127.5) and compute DC removal
         var sumI = 0.0
         var sumQ = 0.0
@@ -88,7 +104,7 @@ class Radix2FftEngine(val fftSize: Int = 1024) {
             }
         }
 
-        val ookSummary = detectOokBursts(iqBytes, byteLength, sampleRateHz)
+        val ookSummary = detectOokBursts(iqBytes, safeByteLength, safeSampleRateHz)
 
         fftInPlace(real, imag)
 
@@ -114,13 +130,13 @@ class Radix2FftEngine(val fftSize: Int = 1024) {
         val ampVar = if (samplePairs > 0) (ampSqSum / samplePairs) - ampMean * ampMean else 0.0
         val phaseVar = if (samplePairs > 1) phaseDiffSqSum / (samplePairs - 1) else 0.0
 
-        val binWidthHz = sampleRateHz.toDouble() / fftSize.toDouble()
+        val binWidthHz = safeSampleRateHz.toDouble() / fftSize.toDouble()
         val peaks = detectPeaks(
             bins = bins,
             noiseFloor = noiseFloor,
-            thresholdDb = peakThresholdDb,
-            centerFreqMhz = centerFreqMhz,
-            sampleRateHz = sampleRateHz,
+            thresholdDb = safeThresholdDb,
+            centerFreqMhz = safeCenterFreqMhz,
+            sampleRateHz = safeSampleRateHz,
             binWidthHz = binWidthHz,
             ampVar = ampVar,
             phaseVar = phaseVar,
@@ -129,8 +145,8 @@ class Radix2FftEngine(val fftSize: Int = 1024) {
 
         return SpectrumFrame(
             timestamp = System.currentTimeMillis(),
-            centerFreqMhz = centerFreqMhz,
-            sampleRateHz = sampleRateHz,
+            centerFreqMhz = safeCenterFreqMhz,
+            sampleRateHz = safeSampleRateHz,
             binsDb = bins,
             noiseFloorDb = noiseFloor,
             peakPowerDb = peakPower,

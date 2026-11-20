@@ -6,6 +6,7 @@ import org.aafw.firewall.engine.bluetooth.BleAdParser
 import org.aafw.firewall.engine.bluetooth.BtSnoopParser
 import org.aafw.firewall.engine.network.IdsEngine
 import org.aafw.firewall.engine.network.PacketParser
+import org.aafw.firewall.engine.rf.Radix2FftEngine
 import java.io.ByteArrayInputStream
 
 /**
@@ -17,6 +18,7 @@ import java.io.ByteArrayInputStream
 class SecurityParsersFuzzTest {
 
     private val idsEngine = IdsEngine()
+    private val fftEngine = Radix2FftEngine(fftSize = 256)
 
     @FuzzTest(maxDuration = "5m")
     fun fuzzPacketAndIdsPipeline(data: FuzzedDataProvider) {
@@ -40,6 +42,22 @@ class SecurityParsersFuzzTest {
     @FuzzTest(maxDuration = "5m")
     fun fuzzBleAdTlvParser(data: FuzzedDataProvider) {
         BleAdParser.parseAdStructures(data.consumeRemainingAsBytes())
+    }
+
+    @FuzzTest(maxDuration = "5m")
+    fun fuzzRadix2FftEngine(data: FuzzedDataProvider) {
+        val sampleRate = data.consumeInt()
+        val byteLen = data.consumeInt()
+        val centerFreq = data.consumeDouble()
+        val threshold = data.consumeFloat()
+        val iqBytes = data.consumeRemainingAsBytes()
+        fftEngine.processCu8Block(
+            iqBytes = iqBytes,
+            byteLength = byteLen,
+            centerFreqMhz = centerFreq,
+            sampleRateHz = sampleRate,
+            peakThresholdDb = threshold
+        ) { "FuzzBand" to "FuzzProto" }
     }
 
     companion object {

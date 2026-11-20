@@ -4,8 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.VpnService
@@ -13,6 +15,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.system.OsConstants
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import org.aafw.firewall.BuildConfig
 import org.aafw.firewall.FirewallApplication
 import org.aafw.firewall.MainActivity
@@ -30,6 +33,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
@@ -43,8 +47,10 @@ import java.nio.channels.SocketChannel
 import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 class FirewallVpnService : VpnService() {
@@ -70,7 +76,25 @@ class FirewallVpnService : VpnService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val secureRandom = SecureRandom()
     private val packetIdGen = AtomicLong(1L)
-    private val uidLabelCache = ConcurrentHashMap<Int, String>()
+    private val uidCacheLock = Any()
+    private val uidLabelCache = object : LinkedHashMap<Int, String>(128, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, String>?): Boolean {
+            return size > MAX_UID_CACHE
+        }
+    }
+    private val packageReceiverRegistered = AtomicBoolean(false)
+    private val packageChangeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val changedUid = intent?.getIntExtra(Intent.EXTRA_UID, INVALID_UID) ?: INVALID_UID
+            synchronized(uidCacheLock) {
+                if (changedUid >= 0) {
+                    uidLabelCache.remove(changedUid)
+                } else {
+                    uidLabelCache.clear()
+                }
+            }
+        }
+    }
     private val udpSessions = ConcurrentHashMap<String, UdpRelaySession>()
     private val tcpSessions = ConcurrentHashMap<String, TcpRelaySession>()
     private val tunWriteLock = Any()
@@ -192,11 +216,11 @@ class FirewallVpnService : VpnService() {
 
             tunInterface = pfd
             tunOutput = FileOutputStream(pfd.fileDescriptor)
+            registerPackageChangeReceiver()
             appContainer.telemetryBus.setVpnState(VpnEngineState.RUNNING)
             updateNotification("Firewall & Inline IDS Active • TUN Armed")
 
-            startRuleObservers()
-            startPacketLoop(pfd)
+            startRuleObserversAndPacketLoop(pfd)
             startSessionCleanupLoop()
         } catch (e: Exception) {
             appContainer.telemetryBus.setVpnState(
@@ -207,14 +231,61 @@ class FirewallVpnService : VpnService() {
         }
     }
 
-    private fun startRuleObservers() {
+    private fun registerPackageChangeReceiver() {
+        if (!packageReceiverRegistered.compareAndSet(false, true)) return
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addDataScheme("package")
+        }
+        runCatching {
+            ContextCompat.registerReceiver(
+                this,
+                packageChangeReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        }.onFailure {
+            packageReceiverRegistered.set(false)
+        }
+    }
+
+    private fun unregisterPackageChangeReceiver() {
+        if (!packageReceiverRegistered.compareAndSet(true, false)) return
+        runCatching { unregisterReceiver(packageChangeReceiver) }
+    }
+
+    private fun startRuleObserversAndPacketLoop(pfd: ParcelFileDescriptor) {
         observerJob?.cancel()
         observerJob = serviceScope.launch {
-            appContainer.repository.ensureSeeded()
-            syncRulesAndFeeds()
+            // Load persisted settings, rules, and threat feed BEFORE starting packet forwarding
+            // so blocked apps cannot slip through during VPN startup (fail-closed).
+            runCatching {
+                appContainer.repository.ensureSeeded()
+                val initialSettings = appContainer.preferences.settingsFlow.first()
+                appContainer.latestDefaultBlockAll.set(initialSettings.defaultBlockAllMode)
+                appContainer.idsEngine.updateConfig(
+                    IdsConfig(
+                        dnsPhishingEnabled = initialSettings.idsDnsPhishingEnabled,
+                        heuristicsEnabled = initialSettings.idsHeuristicsEnabled,
+                        behavioralScanEnabled = initialSettings.idsBehavioralScanEnabled,
+                        httpDpiEnabled = initialSettings.idsHttpDpiEnabled
+                    )
+                )
+                syncRulesAndFeeds()
+                if (initialSettings.autoRecordPcapOnVpnStart && !pcapngWriter.isRecording()) {
+                    startPcapRecording()
+                }
+            }
+
+            if (isActive && tunInterface === pfd) {
+                startPacketLoop(pfd)
+            }
 
             launch {
                 appContainer.preferences.settingsFlow.collect { settings ->
+                    appContainer.latestDefaultBlockAll.set(settings.defaultBlockAllMode)
                     appContainer.idsEngine.updateConfig(
                         IdsConfig(
                             dnsPhishingEnabled = settings.idsDnsPhishingEnabled,
@@ -390,26 +461,28 @@ class FirewallVpnService : VpnService() {
 
     private fun resolveUidLabel(uid: Int): String {
         if (uid < 0) return "Kernel / Unattributed"
-        if (uidLabelCache.size >= MAX_UID_CACHE) {
-            uidLabelCache.clear()
+        synchronized(uidCacheLock) {
+            uidLabelCache[uid]?.let { return it }
         }
-        return uidLabelCache.computeIfAbsent(uid) {
-            when (uid) {
-                0 -> "root (UID 0)"
-                1000 -> "Android System (1000)"
-                else -> {
-                    val pkgs = runCatching { packageManager.getPackagesForUid(uid) }.getOrNull()
-                    val pkg = pkgs?.firstOrNull()
-                    if (pkg != null) {
-                        val ai = runCatching { packageManager.getApplicationInfo(pkg, 0) }.getOrNull()
-                        AppLabelResolver.resolve(null, ai)
-                            .takeIf { ai != null } ?: AppLabelResolver.resolveFromPackageName(pkg)
-                    } else {
-                        "UID $uid"
-                    }
+        val resolved = when (uid) {
+            0 -> "root (UID 0)"
+            1000 -> "Android System (1000)"
+            else -> {
+                val pkgs = runCatching { packageManager.getPackagesForUid(uid) }.getOrNull()
+                val pkg = pkgs?.firstOrNull()
+                if (pkg != null) {
+                    val ai = runCatching { packageManager.getApplicationInfo(pkg, 0) }.getOrNull()
+                    AppLabelResolver.resolve(null, ai)
+                        .takeIf { ai != null } ?: AppLabelResolver.resolveFromPackageName(pkg)
+                } else {
+                    "UID $uid"
                 }
             }
         }
+        synchronized(uidCacheLock) {
+            uidLabelCache[uid] = resolved
+        }
+        return resolved
     }
 
     private fun forwardUdpIpv4(packet: ParsedPacket, raw: ByteArray, appUid: Int, appLabel: String) {
@@ -770,6 +843,10 @@ class FirewallVpnService : VpnService() {
         packetLoopJob?.cancel()
         cleanupJob?.cancel()
         observerJob?.cancel()
+        unregisterPackageChangeReceiver()
+        synchronized(uidCacheLock) {
+            uidLabelCache.clear()
+        }
 
         serviceScope.launch {
             try {

@@ -24,3 +24,10 @@
 # Keep USB-OTG & Bluetooth/RF data models and reflection-safe enums
 -keep enum org.aafw.firewall.engine.** { *; }
 -keep enum org.aafw.firewall.vpn.** { *; }
+
+# Strip debug/verbose/info logging in release builds to prevent packet/SNI/UID metadata leakage to logcat
+-assumenosideeffects class android.util.Log {
+    public static int v(...);
+    public static int d(...);
+    public static int i(...);
+}

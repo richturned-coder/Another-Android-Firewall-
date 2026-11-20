@@ -29,7 +29,7 @@ class AppContainer(private val application: Application) {
         )
     }
     val preferences: PreferencesRepository by lazy { PreferencesRepository(application) }
-    val ruleEngine: FirewallRuleEngine by lazy { FirewallRuleEngine() }
+    val ruleEngine: FirewallRuleEngine by lazy { FirewallRuleEngine(failClosedUntilRulesLoaded = true) }
     val idsEngine: IdsEngine by lazy { IdsEngine() }
     val telemetryBus: VpnTelemetryBus by lazy { VpnTelemetryBus() }
     val bleMonitor: BleThreatMonitor by lazy { BleThreatMonitor(application) }

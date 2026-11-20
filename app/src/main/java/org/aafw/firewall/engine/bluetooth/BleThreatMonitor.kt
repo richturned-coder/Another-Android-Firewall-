@@ -82,6 +82,12 @@ data class BleMonitorSnapshot(
 )
 
 class BleThreatMonitor(private val context: Context) {
+    companion object {
+        const val MAX_SIGHTINGS = 200
+        const val MAX_RECENT_PACKETS = 4_096
+        const val MAX_RECENT_FLOOD_EVENTS = 2_048
+    }
+
     private val bluetoothManager: BluetoothManager? by lazy {
         context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
     }
@@ -210,50 +216,73 @@ class BleThreatMonitor(private val context: Context) {
         val rawBytes = record?.bytes ?: ByteArray(0)
         val deviceName = record?.deviceName ?: runCatching { result.device?.name }.getOrNull()
         val rssi = result.rssi
-
         val (vendorTag, baseThreat, baseNote, isSpamCandidate) = classifyAdvertisingFrame(record, rawBytes)
-
-        val existing = sightings[address]
-        val firstSeen = existing?.firstSeenAt ?: now
-        val persistenceSec = (now - firstSeen) / 1000L
-        val rssiHistory = ((existing?.rssiHistory ?: emptyList()) + rssi).takeLast(12)
-        val count = (existing?.packetCount ?: 0) + 1
-
-        var finalThreat = baseThreat
-        var finalNote = baseNote
-
-        if (baseThreat == BleThreatClass.TRACKER_WATCH && persistenceSec >= 180L) {
-            finalThreat = BleThreatClass.TRACKER_PERSISTENT
-            finalNote = "$baseNote • Persistent >3m (${persistenceSec}s) — potential stalking tag"
-        }
-
-        val updated = BleDeviceSighting(
+        ingestFrame(
             address = address,
-            name = deviceName ?: existing?.name,
+            deviceName = deviceName,
             rssi = rssi,
-            rssiHistory = rssiHistory,
+            rawBytes = rawBytes,
             vendorTag = vendorTag,
-            threatClass = finalThreat,
-            threatNote = finalNote,
-            firstSeenAt = firstSeen,
-            lastSeenAt = now,
-            packetCount = count,
-            rawAdvHex = rawBytes.take(31).joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
+            baseThreat = baseThreat,
+            baseNote = baseNote,
+            isSpamCandidate = isSpamCandidate,
+            now = now
         )
+    }
 
+    internal fun ingestFrame(
+        address: String,
+        deviceName: String?,
+        rssi: Int,
+        rawBytes: ByteArray,
+        vendorTag: String,
+        baseThreat: BleThreatClass,
+        baseNote: String,
+        isSpamCandidate: Boolean,
+        now: Long = System.currentTimeMillis()
+    ) {
         var pps = 0
         var spamActive = false
         var spamSummary: String? = null
+        val sorted: List<BleDeviceSighting>
 
         synchronized(lock) {
+            val existing = sightings[address]
+            val firstSeen = existing?.firstSeenAt ?: now
+            val persistenceSec = ((now - firstSeen) / 1000L).coerceAtLeast(0L)
+            val rssiHistory = ((existing?.rssiHistory ?: emptyList()) + rssi).takeLast(12)
+            val count = (existing?.packetCount ?: 0) + 1
+
+            var finalThreat = baseThreat
+            var finalNote = baseNote
+
+            if (baseThreat == BleThreatClass.TRACKER_WATCH && persistenceSec >= 180L) {
+                finalThreat = BleThreatClass.TRACKER_PERSISTENT
+                finalNote = "$baseNote • Persistent >3m (${persistenceSec}s) — potential stalking tag"
+            }
+
+            val updated = BleDeviceSighting(
+                address = address,
+                name = deviceName ?: existing?.name,
+                rssi = rssi,
+                rssiHistory = rssiHistory,
+                vendorTag = vendorTag,
+                threatClass = finalThreat,
+                threatNote = finalNote,
+                firstSeenAt = firstSeen,
+                lastSeenAt = now,
+                packetCount = count,
+                rawAdvHex = rawBytes.take(31).joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
+            )
+
             sightings[address] = updated
-            if (sightings.size > 200) {
+            if (sightings.size > MAX_SIGHTINGS) {
                 val oldestKey = sightings.entries.minByOrNull { it.value.lastSeenAt }?.key
                 if (oldestKey != null) sightings.remove(oldestKey)
             }
 
             recentAllPackets.addLast(now)
-            while (recentAllPackets.isNotEmpty() && now - recentAllPackets.first() > 1000L) {
+            while (recentAllPackets.isNotEmpty() && (now - recentAllPackets.first() > 1000L || recentAllPackets.size > MAX_RECENT_PACKETS)) {
                 recentAllPackets.removeFirst()
             }
             pps = recentAllPackets.size
@@ -261,7 +290,7 @@ class BleThreatMonitor(private val context: Context) {
             if (isSpamCandidate) {
                 recentFloodEvents.addLast(now to address)
             }
-            while (recentFloodEvents.isNotEmpty() && now - recentFloodEvents.first().first > 5000L) {
+            while (recentFloodEvents.isNotEmpty() && (now - recentFloodEvents.first().first > 5000L || recentFloodEvents.size > MAX_RECENT_FLOOD_EVENTS)) {
                 recentFloodEvents.removeFirst()
             }
             val uniqueFloodMacs = recentFloodEvents.map { it.second }.toSet().size
@@ -273,12 +302,13 @@ class BleThreatMonitor(private val context: Context) {
                     threatNote = "Part of rotating-MAC BLE advertising flood"
                 )
             }
+
+            sorted = sightings.values.sortedWith(
+                compareByDescending<BleDeviceSighting> { it.threatClass.ordinal }
+                    .thenByDescending { it.lastSeenAt }
+            )
         }
 
-        val sorted = sightings.values.sortedWith(
-            compareByDescending<BleDeviceSighting> { it.threatClass.ordinal }
-                .thenByDescending { it.lastSeenAt }
-        )
         val trackerCount = sorted.count {
             it.threatClass == BleThreatClass.TRACKER_WATCH || it.threatClass == BleThreatClass.TRACKER_PERSISTENT
         }
@@ -292,6 +322,10 @@ class BleThreatMonitor(private val context: Context) {
             trackerCount = trackerCount,
             devices = sorted
         )
+    }
+
+    internal fun trackedStateSizes(): Triple<Int, Int, Int> = synchronized(lock) {
+        Triple(sightings.size, recentAllPackets.size, recentFloodEvents.size)
     }
 
     private data class Classification(

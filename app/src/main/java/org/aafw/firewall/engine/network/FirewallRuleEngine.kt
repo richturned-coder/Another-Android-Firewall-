@@ -21,6 +21,7 @@ private data class CidrRule(
 )
 
 private data class RuleSnapshot(
+    val rulesLoaded: Boolean,
     val defaultBlockAll: Boolean,
     val appRules: Map<Int, RuleAction>,
     val exactIpRules: Map<String, RuleAction>,
@@ -29,9 +30,12 @@ private data class RuleSnapshot(
     val domainRules: Map<String, RuleAction>
 )
 
-class FirewallRuleEngine {
+class FirewallRuleEngine(
+    private val failClosedUntilRulesLoaded: Boolean = false
+) {
     private val snapshotRef = AtomicReference(
         RuleSnapshot(
+            rulesLoaded = false,
             defaultBlockAll = false,
             appRules = emptyMap(),
             exactIpRules = emptyMap(),
@@ -40,6 +44,8 @@ class FirewallRuleEngine {
             domainRules = emptyMap()
         )
     )
+
+    fun isRulesLoaded(): Boolean = snapshotRef.get().rulesLoaded
 
     fun updateRules(rules: List<FirewallRuleEntity>, defaultBlockAll: Boolean) {
         val appMap = HashMap<Int, RuleAction>()
@@ -70,6 +76,7 @@ class FirewallRuleEngine {
 
         snapshotRef.set(
             RuleSnapshot(
+                rulesLoaded = true,
                 defaultBlockAll = defaultBlockAll,
                 appRules = appMap,
                 exactIpRules = exactIps,
@@ -81,7 +88,24 @@ class FirewallRuleEngine {
     }
 
     fun evaluate(packet: ParsedPacket, appUid: Int): FirewallVerdict {
+        if (packet.isMalformed) {
+            return FirewallVerdict(
+                allowed = false,
+                matchedRuleType = null,
+                matchedTarget = null,
+                reason = "Malformed packet dropped (fail-closed)"
+            )
+        }
+
         val snap = snapshotRef.get()
+        if (failClosedUntilRulesLoaded && !snap.rulesLoaded) {
+            return FirewallVerdict(
+                allowed = false,
+                matchedRuleType = null,
+                matchedTarget = null,
+                reason = "Rules initializing (fail-closed)"
+            )
+        }
 
         // 1. Explicit Domain / SNI rule (most specific indicator)
         val host = packet.domainOrSni?.lowercase()
@@ -149,11 +173,16 @@ class FirewallRuleEngine {
 
         // 5. Fallback to Global Default Posture (Denylist vs Allowlist)
         val allowByDefault = !snap.defaultBlockAll
+        val fallbackReason = when {
+            allowByDefault -> "Default Allow (Denylist)"
+            appUid < 0 -> "Unattributed UID blocked (AFWall+ Allowlist fail-closed)"
+            else -> "Default Block (AFWall+ Allowlist)"
+        }
         return FirewallVerdict(
             allowed = allowByDefault,
             matchedRuleType = null,
             matchedTarget = null,
-            reason = if (allowByDefault) "Default Allow (Denylist)" else "Default Block (AFWall+ Allowlist)"
+            reason = fallbackReason
         )
     }
 
