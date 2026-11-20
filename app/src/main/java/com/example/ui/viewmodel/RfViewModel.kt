@@ -33,7 +33,7 @@ class RfViewModel(
     private val container: AppContainer
 ) : AndroidViewModel(application) {
 
-    private val fftEngine = Radix2FftEngine(fftSize = 1024)
+    private val fftEngine by lazy { Radix2FftEngine(fftSize = 1024) }
     private var streamJob: Job? = null
 
     val settings: StateFlow<AppSettings> = container.preferences.settingsFlow
@@ -50,8 +50,10 @@ class RfViewModel(
     }
 
     fun scanUsbDevices() {
-        val devices = container.usbSdrManager.enumerateDevices()
-        _uiState.update { it.copy(usbDevices = devices) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val devices = container.usbSdrManager.enumerateDevices()
+            _uiState.update { it.copy(usbDevices = devices) }
+        }
     }
 
     fun requestUsbPermission(hw: DetectedUsbHardware) {

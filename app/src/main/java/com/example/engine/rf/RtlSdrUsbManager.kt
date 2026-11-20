@@ -46,7 +46,9 @@ class RtlSdrUsbManager(private val context: Context) {
         )
     }
 
-    private val usbManager: UsbManager? = context.getSystemService(Context.USB_SERVICE) as? UsbManager
+    private val usbManager: UsbManager? by lazy {
+        context.getSystemService(Context.USB_SERVICE) as? UsbManager
+    }
 
     fun enumerateDevices(): List<DetectedUsbHardware> {
         val mgr = usbManager ?: return emptyList()

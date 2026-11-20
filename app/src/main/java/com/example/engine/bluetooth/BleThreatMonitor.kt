@@ -49,8 +49,9 @@ data class BleMonitorSnapshot(
 )
 
 class BleThreatMonitor(private val context: Context) {
-    private val bluetoothManager: BluetoothManager? =
+    private val bluetoothManager: BluetoothManager? by lazy {
         context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+    }
     private val adapter: BluetoothAdapter? get() = bluetoothManager?.adapter
     private val scanner: BluetoothLeScanner? get() = adapter?.bluetoothLeScanner
 
@@ -59,12 +60,17 @@ class BleThreatMonitor(private val context: Context) {
     private val recentAllPackets = ArrayDeque<Long>()
     private val lock = Any()
 
-    private val _snapshot = MutableStateFlow(
-        BleMonitorSnapshot(bluetoothEnabled = adapter?.isEnabled == true)
-    )
+    private val _snapshot = MutableStateFlow(BleMonitorSnapshot())
     val snapshot: StateFlow<BleMonitorSnapshot> = _snapshot.asStateFlow()
 
     private var activeCallback: ScanCallback? = null
+
+    fun refreshAdapterState() {
+        val enabled = runCatching { adapter?.isEnabled == true }.getOrDefault(false)
+        if (_snapshot.value.bluetoothEnabled != enabled) {
+            _snapshot.value = _snapshot.value.copy(bluetoothEnabled = enabled)
+        }
+    }
 
     @SuppressLint("MissingPermission")
     fun startScanning(): Boolean {

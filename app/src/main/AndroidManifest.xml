@@ -61,9 +61,11 @@
 
         <activity
             android:name=".MainActivity"
+            android:colorMode="default"
             android:exported="true"
             android:launchMode="singleTop"
-            android:theme="@style/Theme.AnotherDroidFirewall">
+            android:theme="@style/Theme.AnotherDroidFirewall"
+            tools:targetApi="o">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

@@ -84,9 +84,9 @@ private val topDestinations = listOf(
 fun MainAppShell(
     firewallViewModel: FirewallViewModel,
     idsViewModel: IdsViewModel,
-    bluetoothViewModel: BluetoothViewModel,
-    rfViewModel: RfViewModel,
-    irViewModel: IrViewModel
+    getBluetoothViewModel: () -> BluetoothViewModel,
+    getRfViewModel: () -> RfViewModel,
+    getIrViewModel: () -> IrViewModel
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -222,17 +222,20 @@ fun MainAppShell(
                                 )
                             }
                             composable(ROUTE_BLUETOOTH) {
+                                val bluetoothViewModel = remember { getBluetoothViewModel() }
                                 BluetoothScreen(
                                     viewModel = bluetoothViewModel,
                                     onShowMessage = ::showMessage
                                 )
                             }
                             composable(ROUTE_RF) {
+                                val rfViewModel = remember { getRfViewModel() }
                                 RfSpectrumScreen(
                                     viewModel = rfViewModel
                                 )
                             }
                             composable(ROUTE_IR) {
+                                val irViewModel = remember { getIrViewModel() }
                                 IrSpotterScreen(
                                     viewModel = irViewModel,
                                     onShowMessage = ::showMessage

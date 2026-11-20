@@ -15,23 +15,25 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
-class AppContainer(application: Application) {
+class AppContainer(private val application: Application) {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    val database: FirewallDatabase = FirewallDatabase.getInstance(application)
-    val repository: FirewallRepository = FirewallRepository(
-        ruleDao = database.firewallRuleDao(),
-        alertDao = database.idsAlertDao(),
-        threatFeedDao = database.threatFeedDao(),
-        captureSessionDao = database.captureSessionDao(),
-        rfAllocationDao = database.rfAllocationDao()
-    )
-    val preferences: PreferencesRepository = PreferencesRepository(application)
-    val ruleEngine: FirewallRuleEngine = FirewallRuleEngine()
-    val idsEngine: IdsEngine = IdsEngine()
-    val telemetryBus: VpnTelemetryBus = VpnTelemetryBus()
-    val bleMonitor: BleThreatMonitor = BleThreatMonitor(application)
-    val usbSdrManager: RtlSdrUsbManager = RtlSdrUsbManager(application)
+    val database: FirewallDatabase by lazy { FirewallDatabase.getInstance(application) }
+    val repository: FirewallRepository by lazy {
+        FirewallRepository(
+            ruleDao = database.firewallRuleDao(),
+            alertDao = database.idsAlertDao(),
+            threatFeedDao = database.threatFeedDao(),
+            captureSessionDao = database.captureSessionDao(),
+            rfAllocationDao = database.rfAllocationDao()
+        )
+    }
+    val preferences: PreferencesRepository by lazy { PreferencesRepository(application) }
+    val ruleEngine: FirewallRuleEngine by lazy { FirewallRuleEngine() }
+    val idsEngine: IdsEngine by lazy { IdsEngine() }
+    val telemetryBus: VpnTelemetryBus by lazy { VpnTelemetryBus() }
+    val bleMonitor: BleThreatMonitor by lazy { BleThreatMonitor(application) }
+    val usbSdrManager: RtlSdrUsbManager by lazy { RtlSdrUsbManager(application) }
     val latestDefaultBlockAll: AtomicBoolean = AtomicBoolean(false)
 
     init {

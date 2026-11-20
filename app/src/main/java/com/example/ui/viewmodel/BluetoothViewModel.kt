@@ -10,6 +10,7 @@ import com.example.engine.bluetooth.BleMonitorSnapshot
 import com.example.engine.bluetooth.BtSnoopParser
 import com.example.engine.bluetooth.HciPacketLayer
 import com.example.engine.bluetooth.HciParsedFrame
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -35,14 +36,18 @@ class BluetoothViewModel(
 
     val bleSnapshot: StateFlow<BleMonitorSnapshot> = container.bleMonitor.snapshot
 
-    private val _hciState = MutableStateFlow(
-        HciCaptureUiState(
-            shizukuInstalled = BtSnoopParser.isShizukuInstalled(application)
-        )
-    )
+    private val _hciState = MutableStateFlow(HciCaptureUiState())
     val hciState: StateFlow<HciCaptureUiState> = _hciState.asStateFlow()
 
     private var liveSocketJob: Job? = null
+
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.bleMonitor.refreshAdapterState()
+            val hasShizuku = BtSnoopParser.isShizukuInstalled(getApplication())
+            _hciState.update { it.copy(shizukuInstalled = hasShizuku) }
+        }
+    }
 
     fun startBleScan() {
         container.bleMonitor.startScanning()

@@ -71,7 +71,9 @@ class IrViewModel(
     }
 
     fun refreshUsbIrHardware() {
-        val irBridges = container.usbSdrManager.enumerateDevices().filter { it.isIrSerialBridge }
-        _uiState.update { it.copy(usbIrDevices = irBridges) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val irBridges = container.usbSdrManager.enumerateDevices().filter { it.isIrSerialBridge }
+            _uiState.update { it.copy(usbIrDevices = irBridges) }
+        }
     }
 }

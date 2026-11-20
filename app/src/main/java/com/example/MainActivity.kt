@@ -5,8 +5,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.PixelFormat
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
@@ -29,11 +31,18 @@ import com.example.ui.viewmodel.RfViewModel
 
 class MainActivity : ComponentActivity() {
 
+    private lateinit var viewModelFactory: ViewModelProvider.Factory
     private lateinit var firewallViewModel: FirewallViewModel
     private lateinit var idsViewModel: IdsViewModel
-    private lateinit var bluetoothViewModel: BluetoothViewModel
-    private lateinit var rfViewModel: RfViewModel
-    private lateinit var irViewModel: IrViewModel
+    private val bluetoothViewModelLazy = lazy(LazyThreadSafetyMode.NONE) {
+        ViewModelProvider(this, viewModelFactory)[BluetoothViewModel::class.java]
+    }
+    private val rfViewModelLazy = lazy(LazyThreadSafetyMode.NONE) {
+        ViewModelProvider(this, viewModelFactory)[RfViewModel::class.java]
+    }
+    private val irViewModelLazy = lazy(LazyThreadSafetyMode.NONE) {
+        ViewModelProvider(this, viewModelFactory)[IrViewModel::class.java]
+    }
 
     private val notificationPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -41,20 +50,28 @@ class MainActivity : ComponentActivity() {
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            rfViewModel.scanUsbDevices()
-            irViewModel.refreshUsbIrHardware()
+            if (rfViewModelLazy.isInitialized()) {
+                rfViewModelLazy.value.scanUsbDevices()
+            }
+            if (irViewModelLazy.isInitialized()) {
+                irViewModelLazy.value.refreshUsbIrHardware()
+            }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.setFormat(PixelFormat.RGBA_8888)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            window.colorMode = ActivityInfo.COLOR_MODE_DEFAULT
+        }
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
         )
 
         val container = (application as FirewallApplication).container
-        val factory = object : ViewModelProvider.Factory {
+        viewModelFactory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T = when (modelClass) {
                 FirewallViewModel::class.java -> FirewallViewModel(application, container) as T
@@ -66,11 +83,8 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        firewallViewModel = ViewModelProvider(this, factory)[FirewallViewModel::class.java]
-        idsViewModel = ViewModelProvider(this, factory)[IdsViewModel::class.java]
-        bluetoothViewModel = ViewModelProvider(this, factory)[BluetoothViewModel::class.java]
-        rfViewModel = ViewModelProvider(this, factory)[RfViewModel::class.java]
-        irViewModel = ViewModelProvider(this, factory)[IrViewModel::class.java]
+        firewallViewModel = ViewModelProvider(this, viewModelFactory)[FirewallViewModel::class.java]
+        idsViewModel = ViewModelProvider(this, viewModelFactory)[IdsViewModel::class.java]
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -95,9 +109,9 @@ class MainActivity : ComponentActivity() {
                 MainAppShell(
                     firewallViewModel = firewallViewModel,
                     idsViewModel = idsViewModel,
-                    bluetoothViewModel = bluetoothViewModel,
-                    rfViewModel = rfViewModel,
-                    irViewModel = irViewModel
+                    getBluetoothViewModel = { bluetoothViewModelLazy.value },
+                    getRfViewModel = { rfViewModelLazy.value },
+                    getIrViewModel = { irViewModelLazy.value }
                 )
             }
         }
