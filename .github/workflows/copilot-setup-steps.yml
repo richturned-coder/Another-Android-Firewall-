@@ -1,0 +1,58 @@
+name: "Copilot Setup Steps"
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+# 1. Harden top-level permissions (deny-by-default)
+permissions: {}
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    # 2. Prevent runaway setup jobs from burning Actions minutes
+    timeout-minutes: 15
+
+    # 3. Grant only read access to checkout code; Copilot injects its own token later
+    permissions:
+      contents: read
+
+    # 4. Bind to the dedicated 'copilot' environment if using setup secrets/OIDC
+    # environment: copilot
+
+    steps:
+      # 5. Pin actions to immutable full-length commit SHAs & disable credential persistence
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1          # Shallow clone: faster network & disk I/O
+          persist-credentials: false # Prevent leaking GITHUB_TOKEN into .git/config
+
+      # 6. Pre-warm runtime + built-in package cache
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: ".nvmrc" # Single source of truth for runtime version
+          cache: "npm"
+
+      # 7. Cache build artifacts & linters so Copilot's first build/test pass is instant
+      - name: Cache build & lint state
+        uses: actions/cache@5a3ec84eff668545956fd18022175c47e9d7bc68 # v4.2.3
+        with:
+          path: |
+            .next/cache
+            .eslintcache
+            .tsbuildinfo
+          key: copilot-build-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            copilot-build-${{ runner.os }}-
+
+      # 8. Deterministic, hardened dependency installation
+      - name: Install dependencies
+        env:
+          CI: "true"
+          HUSKY: "0"                       # Skip git hook setup in ephemeral runner
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1" # Skip heavy binaries unless E2E is needed
+        run: npm ci --ignore-scripts --no-audit --no-fund
