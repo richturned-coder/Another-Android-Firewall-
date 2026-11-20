@@ -1,0 +1,6 @@
+{
+  "name": "Another Droid Firewall+",
+  "description": "Air-gapped Android local VPN per-app firewall, PCAPNG recorder, inline IDS/DPI, Bluetooth BLE/HCI monitor, CameraX near-IR spotter, and USB-OTG SDR spectrum analyzer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

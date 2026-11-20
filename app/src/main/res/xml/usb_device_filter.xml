@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- RTL-SDR / Realtek RTL2832U / RTL2838 -->
+    <usb-device vendor-id="3034" product-id="10296" /> <!-- 0x0BDA:0x2838 -->
+    <usb-device vendor-id="3034" product-id="10290" /> <!-- 0x0BDA:0x2832 -->
+    <usb-device vendor-id="7531" product-id="4097" />
+    <!-- HackRF One (Great Scott Gadgets) -->
+    <usb-device vendor-id="7504" product-id="24713" /> <!-- 0x1D50:0x6089 -->
+    <!-- Airspy / Airspy Mini -->
+    <usb-device vendor-id="7504" product-id="24737" /> <!-- 0x1D50:0x60A1 -->
+    <!-- Common USB-C IR Transceiver / Serial Bridges (FTDI, CP210x, CH340) -->
+    <usb-device vendor-id="1027" product-id="24577" /> <!-- 0x0403:0x6001 -->
+    <usb-device vendor-id="4292" product-id="60000" /> <!-- 0x10C4:0xEA60 -->
+    <usb-device vendor-id="6790" product-id="29987" /> <!-- 0x1A86:0x7523 -->
+</resources>

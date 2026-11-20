@@ -1,0 +1,80 @@
+<resources>
+    <string name="app_name">Another Droid Firewall+</string>
+    <string name="vpn_service_label">Another Droid Firewall+ Shield</string>
+
+    <!-- Navigation Destinations -->
+    <string name="nav_firewall">Firewall</string>
+    <string name="nav_ids">IDS</string>
+    <string name="nav_bluetooth">Bluetooth</string>
+    <string name="nav_rf">RF</string>
+    <string name="nav_ir">IR</string>
+
+    <!-- Firewall & PCAP -->
+    <string name="firewall_title">FIREWALL CORE</string>
+    <string name="vpn_status_armed">SHIELD ARMED</string>
+    <string name="vpn_status_standby">STANDBY</string>
+    <string name="vpn_status_starting">INITIALIZING TUN</string>
+    <string name="action_arm_vpn">Arm VPN Firewall</string>
+    <string name="action_disarm_vpn">Disarm Firewall</string>
+    <string name="action_start_pcap">Start PCAPNG</string>
+    <string name="action_stop_pcap">Stop PCAPNG</string>
+    <string name="tab_live_stream">Live Stream</string>
+    <string name="tab_app_rules">Per-App</string>
+    <string name="tab_custom_rules">IP / Port / Host</string>
+    <string name="tab_captures">PCAPNG</string>
+    <string name="empty_stream_title">TUN Interface Offline</string>
+    <string name="empty_stream_subtitle">Arm the local VPN firewall to intercept IPv4/IPv6 flows, resolve app UIDs, and inspect packets in real time.</string>
+    <string name="empty_captures_title">No PCAPNG Sessions</string>
+    <string name="empty_captures_subtitle">Arm the firewall and toggle PCAPNG capture to record raw packets with UID and rule verdicts.</string>
+    <string name="action_add_rule">Add Rule</string>
+    <string name="action_export_pcap">Export</string>
+    <string name="action_delete">Delete</string>
+
+    <!-- IDS -->
+    <string name="ids_title">INLINE IDS / DPI</string>
+    <string name="tab_ids_alerts">Alerts</string>
+    <string name="tab_ids_engines">Engines</string>
+    <string name="tab_ids_feeds">Threat Feeds</string>
+    <string name="empty_ids_title">No Threats Detected</string>
+    <string name="empty_ids_subtitle">Inline DNS/SNI phishing, behavioral scan/fuzzing, and HTTP SQLi/XSS/CMDi inspection run automatically while the VPN shield is armed.</string>
+    <string name="action_import_feed">Import Local Feed</string>
+    <string name="action_clear_alerts">Clear Alerts</string>
+
+    <!-- Bluetooth & HCI -->
+    <string name="bt_title">BLUETOOTH &amp; HCI</string>
+    <string name="tab_ble_monitor">BLE Radar</string>
+    <string name="tab_hci_capture">HCI Snoop</string>
+    <string name="action_start_ble">Start BLE Scan</string>
+    <string name="action_stop_ble">Stop BLE Scan</string>
+    <string name="action_import_btsnoop">Import btsnoop / Bugreport</string>
+    <string name="action_connect_btsnoop_socket">Connect Live Socket</string>
+    <string name="empty_ble_title">BLE Passive Monitor Idle</string>
+    <string name="empty_ble_subtitle">Start scanning to detect nearby AirTag/Find My trackers, rogue beacons, and Flipper Zero BLE advertising spam floods.</string>
+    <string name="empty_hci_title">No HCI Frames Loaded</string>
+    <string name="empty_hci_subtitle">Connect to a live local btsnoop socket (Android 17+ / ADB / Shizuku) or import a btsnoop_hci.log / bugreport .zip file.</string>
+
+    <!-- RF Spectrum -->
+    <string name="rf_title">RF SPECTRUM</string>
+    <string name="action_scan_usb">Scan USB-OTG</string>
+    <string name="action_load_cu8">Load .cu8 I/Q</string>
+    <string name="action_start_sdr">Stream SDR</string>
+    <string name="action_stop_sdr">Stop SDR</string>
+    <string name="empty_rf_title">No SDR Stream Active</string>
+    <string name="empty_rf_subtitle">Attach an RTL-SDR (RTL2832U) or HackRF via USB-C OTG, or load a raw .cu8 I/Q file for Radix-2 FFT waterfall and modulation analysis.</string>
+
+    <!-- Near-IR Spotter -->
+    <string name="ir_title">NEAR-IR SPOTTER</string>
+    <string name="action_grant_camera">Enable IR Camera</string>
+    <string name="action_flip_camera">Switch Camera</string>
+    <string name="action_freeze_frame">Freeze</string>
+    <string name="action_resume_frame">Live</string>
+    <string name="empty_ir_title">Optical Sensor Standby</string>
+    <string name="empty_ir_subtitle">Grant camera access to stream YUV-420 frames and isolate 850–940 nm near-IR camera LEDs and laser emitters.</string>
+
+    <!-- Content Descriptions -->
+    <string name="cd_vpn_shield">Toggle local VPN firewall shield</string>
+    <string name="cd_pcap_record">Toggle simultaneous PCAPNG recording</string>
+    <string name="cd_back">Navigate back</string>
+    <string name="cd_search">Search entries</string>
+    <string name="cd_close">Close sheet</string>
+</resources>
