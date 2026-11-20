@@ -49,18 +49,20 @@
     </queries>
 
     <application
-        android:name=".FirewallApplication"
+        android:name="org.aafw.firewall.FirewallApplication"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AnotherDroidFirewall">
+        android:theme="@style/Theme.AnotherDroidFirewall"
+        tools:targetApi="tiramisu">
 
         <activity
-            android:name=".MainActivity"
+            android:name="org.aafw.firewall.MainActivity"
             android:colorMode="default"
             android:exported="true"
             android:launchMode="singleTop"
@@ -79,7 +81,7 @@
         </activity>
 
         <service
-            android:name=".vpn.FirewallVpnService"
+            android:name="org.aafw.firewall.vpn.FirewallVpnService"
             android:exported="false"
             android:foregroundServiceType="specialUse"
             android:label="@string/vpn_service_label"

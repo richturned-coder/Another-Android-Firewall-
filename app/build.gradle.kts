@@ -1,4 +1,5 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import org.gradle.api.tasks.bundling.AbstractArchiveTask
 
 plugins {
   alias(libs.plugins.android.application)
@@ -9,11 +10,11 @@ plugins {
 }
 
 android {
-  namespace = "com.example"
+  namespace = "org.aafw.firewall"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.example"
+    applicationId = "org.aafw.firewall"
     minSdk = 24
     targetSdk = 36
     versionCode = 1
@@ -43,13 +44,20 @@ android {
   buildTypes {
     release {
       isCrunchPngs = false
-      isMinifyEnabled = false
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+      // Prevent local git commit hashes from breaking deterministic builds
+      vcsInfo {
+        include = false
+      }
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
       // AI Studio.
       signingConfig = signingConfigs.getByName("release")
     }
     debug {
+      applicationIdSuffix = ".debug"
+      versionNameSuffix = "-debug"
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
       // AI Studio.
       signingConfig = signingConfigs.getByName("debugConfig")
@@ -64,9 +72,10 @@ android {
     buildConfig = true
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
+  // Disable Google's encrypted Dependency Info Block (breaks reproducibility)
   dependenciesInfo {
     includeInApk = false
-    includeInBundle = true
+    includeInBundle = false
   }
 }
 
@@ -141,4 +150,10 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
   // "ksp"(libs.moshi.kotlin.codegen)
+}
+
+// Normalize archive timestamps and file ordering for reproducible builds
+tasks.withType<AbstractArchiveTask>().configureEach {
+  isPreserveFileTimestamps = false
+  isReproducibleFileOrder = true
 }

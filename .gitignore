@@ -1,7 +1,39 @@
+# AI Studio & local planning artifacts
+.aistudio/
+
+# Signing keys & local secrets (NEVER commit)
+*.jks
+*.keystore
+*.p12
+*.pem
+keystore.properties
+.env
+local.properties
+debug.keystore
+
+# Android / Gradle build outputs
+.gradle/
+.kotlin/
+build/
+/build
+app/build/
+.build-outputs/
+captures/
+/captures
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.hprof
+
+# Forensic / test capture files
+*.pcap
+*.pcapng
+*.btsnoop
+
+# IDE & OS metadata
 *.iml
-.gradle
-.kotlin
-/local.properties
 /.idea/caches
 /.idea/libraries
 /.idea/modules.xml
@@ -9,10 +41,3 @@
 /.idea/navEditor.xml
 /.idea/assetWizardSettings.xml
 .DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
-local.properties
-.env
-debug.keystore
