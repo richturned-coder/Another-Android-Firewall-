@@ -33,7 +33,18 @@ class NearIrAnalyzer(
     private val onResult: (IrAnalysisFrame) -> Unit
 ) : ImageAnalysis.Analyzer {
 
+    companion object {
+        private const val MAX_CANDIDATES = 96
+    }
+
     private var lastProcessedMs = 0L
+    // Reusable primitive scratch buffers (CameraX ImageAnalysis runs serially on one executor thread)
+    private val candX = IntArray(MAX_CANDIDATES)
+    private val candY = IntArray(MAX_CANDIDATES)
+    private val candLuma = IntArray(MAX_CANDIDATES)
+    private val candViolet = FloatArray(MAX_CANDIDATES)
+    private val candIsViolet = BooleanArray(MAX_CANDIDATES)
+    private val candUsed = BooleanArray(MAX_CANDIDATES)
 
     override fun analyze(image: ImageProxy) {
         try {
@@ -67,9 +78,7 @@ class NearIrAnalyzer(
             var totalLuma = 0L
             var sampleCount = 0
             var maxLuma = 0
-
-            data class Candidate(val x: Int, val y: Int, val yVal: Int, val violetScore: Float, val isViolet: Boolean)
-            val candidates = ArrayList<Candidate>(32)
+            var candCount = 0
 
             var row = 0
             while (row < height) {
@@ -87,7 +96,7 @@ class NearIrAnalyzer(
                         sampleCount++
                         if (luma > maxLuma) maxLuma = luma
 
-                        if (luma >= lumaThresh) {
+                        if (luma >= lumaThresh && candCount < MAX_CANDIDATES) {
                             val uvCol = col ushr 1
                             val uIdx = uRowOff + uvCol * uPixStride
                             val vIdx = vRowOff + uvCol * vPixStride
@@ -101,8 +110,14 @@ class NearIrAnalyzer(
                             val isViolet = violetScore >= chromaBiasThresh * 0.45f
                             val isSpecularCore = luma >= 248 && abs(uVal - 128) <= 22 && abs(vVal - 128) <= 22
 
-                            if ((isViolet || isSpecularCore) && candidates.size < 96) {
-                                candidates.add(Candidate(col, row, luma, violetScore, isViolet))
+                            if (isViolet || isSpecularCore) {
+                                candX[candCount] = col
+                                candY[candCount] = row
+                                candLuma[candCount] = luma
+                                candViolet[candCount] = violetScore
+                                candIsViolet[candCount] = isViolet
+                                candUsed[candCount] = false
+                                candCount++
                             }
                         }
                     }
@@ -114,54 +129,59 @@ class NearIrAnalyzer(
             val ambient = if (sampleCount > 0) (totalLuma / sampleCount).toInt() else 0
 
             // Cluster nearby candidate pixels into distinct IR point sources
-            val hotspots = ArrayList<IrHotspot>()
-            val contrastGain = ((lumaThresh - ambient).coerceAtLeast(25)) / 255f
-            val clusterRadiusSq = (minOf(width, height) * 0.08f).let { it * it }
+            val hotspots = if (candCount == 0) {
+                emptyList()
+            } else {
+                val list = ArrayList<IrHotspot>(8)
+                val contrastGain = ((lumaThresh - ambient).coerceAtLeast(25)) / 255f
+                val clusterRadiusSq = (minOf(width, height) * 0.08f).let { it * it }
 
-            val used = BooleanArray(candidates.size)
-            for (i in candidates.indices) {
-                if (used[i]) continue
-                val seed = candidates[i]
-                used[i] = true
-                var sumX = seed.x.toFloat()
-                var sumY = seed.y.toFloat()
-                var count = 1
-                var peakY = seed.yVal
-                var bestViolet = seed.violetScore
-                var hasViolet = seed.isViolet
+                for (i in 0 until candCount) {
+                    if (candUsed[i]) continue
+                    val seedX = candX[i]
+                    val seedY = candY[i]
+                    candUsed[i] = true
+                    var sumX = seedX.toFloat()
+                    var sumY = seedY.toFloat()
+                    var count = 1
+                    var peakY = candLuma[i]
+                    var bestViolet = candViolet[i]
+                    var hasViolet = candIsViolet[i]
 
-                for (j in i + 1 until candidates.size) {
-                    if (used[j]) continue
-                    val other = candidates[j]
-                    val dx = (other.x - seed.x).toFloat()
-                    val dy = (other.y - seed.y).toFloat()
-                    if (dx * dx + dy * dy <= clusterRadiusSq) {
-                        used[j] = true
-                        sumX += other.x
-                        sumY += other.y
-                        count++
-                        if (other.yVal > peakY) peakY = other.yVal
-                        if (other.violetScore > bestViolet) bestViolet = other.violetScore
-                        if (other.isViolet) hasViolet = true
+                    for (j in i + 1 until candCount) {
+                        if (candUsed[j]) continue
+                        val dx = (candX[j] - seedX).toFloat()
+                        val dy = (candY[j] - seedY).toFloat()
+                        if (dx * dx + dy * dy <= clusterRadiusSq) {
+                            candUsed[j] = true
+                            sumX += candX[j]
+                            sumY += candY[j]
+                            count++
+                            if (candLuma[j] > peakY) peakY = candLuma[j]
+                            if (candViolet[j] > bestViolet) bestViolet = candViolet[j]
+                            if (candIsViolet[j]) hasViolet = true
+                        }
+                    }
+
+                    // Point sources (IR LEDs / lasers) have concentrated high-contrast cores against darker surroundings
+                    if (ambient < 190 || hasViolet) {
+                        val normX = (sumX / count / width.toFloat()).coerceIn(0f, 1f)
+                        val normY = (sumY / count / height.toFloat()).coerceIn(0f, 1f)
+                        val score = ((peakY / 255f) * 0.55f + bestViolet * 0.3f + contrastGain * 0.15f)
+                            .coerceIn(0.1f, 1f)
+                        list.add(
+                            IrHotspot(
+                                normX = normX,
+                                normY = normY,
+                                intensityScore = score,
+                                peakLuma = peakY,
+                                chromaSignature = if (hasViolet) "NEAR_IR_VIOLET" else "SPECULAR_IR_CORE"
+                            )
+                        )
                     }
                 }
-
-                // Point sources (IR LEDs / lasers) have concentrated high-contrast cores against darker surroundings
-                if (ambient < 190 || hasViolet) {
-                    val normX = (sumX / count / width.toFloat()).coerceIn(0f, 1f)
-                    val normY = (sumY / count / height.toFloat()).coerceIn(0f, 1f)
-                    val score = ((peakY / 255f) * 0.55f + bestViolet * 0.3f + contrastGain * 0.15f)
-                        .coerceIn(0.1f, 1f)
-                    hotspots.add(
-                        IrHotspot(
-                            normX = normX,
-                            normY = normY,
-                            intensityScore = score,
-                            peakLuma = peakY,
-                            chromaSignature = if (hasViolet) "NEAR_IR_VIOLET" else "SPECULAR_IR_CORE"
-                        )
-                    )
-                }
+                if (list.size > 1) list.sortByDescending { it.intensityScore }
+                if (list.size > 6) list.subList(0, 6).toList() else list
             }
 
             onResult(
@@ -169,7 +189,7 @@ class NearIrAnalyzer(
                     timestamp = now,
                     ambientLuma = ambient,
                     peakLuma = maxLuma,
-                    hotspots = hotspots.sortedByDescending { it.intensityScore }.take(6),
+                    hotspots = hotspots,
                     frameWidth = width,
                     frameHeight = height
                 )

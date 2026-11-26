@@ -194,6 +194,32 @@ fun FirewallScreen(
     val customRules = remember(allRules) {
         allRules.filter { it.ruleType != RuleType.APP_UID.name }
     }
+    val filteredPackets = remember(livePackets, searchQuery) {
+        if (searchQuery.isBlank()) {
+            livePackets
+        } else {
+            val q = searchQuery.lowercase()
+            livePackets.filter {
+                it.appLabel.lowercase().contains(q) ||
+                    it.dstIp.contains(q) ||
+                    it.dstPort.toString().contains(q) ||
+                    it.appUid.toString().contains(q) ||
+                    (it.domainOrSni?.lowercase()?.contains(q) == true)
+            }
+        }
+    }
+    val filteredApps = remember(installedApps, searchQuery) {
+        if (searchQuery.isBlank()) {
+            installedApps
+        } else {
+            val q = searchQuery.lowercase()
+            installedApps.filter {
+                it.appLabel.lowercase().contains(q) ||
+                    it.packageName.lowercase().contains(q) ||
+                    it.uid.toString().contains(q)
+            }
+        }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -382,19 +408,6 @@ fun FirewallScreen(
                     }
                 }
 
-                val filteredPackets = if (searchQuery.isBlank()) {
-                    livePackets
-                } else {
-                    val q = searchQuery.lowercase()
-                    livePackets.filter {
-                        it.appLabel.lowercase().contains(q) ||
-                            it.dstIp.contains(q) ||
-                            it.dstPort.toString().contains(q) ||
-                            it.appUid.toString().contains(q) ||
-                            (it.domainOrSni?.lowercase()?.contains(q) == true)
-                    }
-                }
-
                 if (filteredPackets.isEmpty()) {
                     item(key = "empty_stream") {
                         TacticalEmptyState(
@@ -470,17 +483,6 @@ fun FirewallScreen(
                                 Icon(Icons.Default.Refresh, contentDescription = "Refresh app list")
                             }
                         }
-                    }
-                }
-
-                val filteredApps = if (searchQuery.isBlank()) {
-                    installedApps
-                } else {
-                    val q = searchQuery.lowercase()
-                    installedApps.filter {
-                        it.appLabel.lowercase().contains(q) ||
-                            it.packageName.lowercase().contains(q) ||
-                            it.uid.toString().contains(q)
                     }
                 }
 

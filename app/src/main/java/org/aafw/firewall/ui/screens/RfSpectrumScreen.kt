@@ -42,6 +42,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -363,6 +364,11 @@ private fun SpectrumAndWaterfallCanvas(
     peakThresholdDb: Float,
     modifier: Modifier = Modifier
 ) {
+    val tracePath = remember { Path() }
+    val fillPath = remember { Path() }
+    val fillColors = remember { listOf(PhosphorCyan.copy(alpha = 0.28f), Color.Transparent) }
+    val traceStroke = remember { Stroke(width = 2.2f, cap = StrokeCap.Round) }
+
     Canvas(modifier = modifier.background(ObsidianBlack)) {
         val w = size.width
         val h = size.height
@@ -407,8 +413,8 @@ private fun SpectrumAndWaterfallCanvas(
 
             // FFT Trace + gradient fill
             val step = maxOf(1, bins.size / 256)
-            val tracePath = Path()
-            val fillPath = Path()
+            tracePath.reset()
+            fillPath.reset()
             var first = true
             var xIdx = 0
             while (xIdx < bins.size) {
@@ -431,7 +437,7 @@ private fun SpectrumAndWaterfallCanvas(
             drawPath(
                 path = fillPath,
                 brush = Brush.verticalGradient(
-                    colors = listOf(PhosphorCyan.copy(alpha = 0.28f), Color.Transparent),
+                    colors = fillColors,
                     startY = 0f,
                     endY = fftH
                 )
@@ -439,7 +445,7 @@ private fun SpectrumAndWaterfallCanvas(
             drawPath(
                 path = tracePath,
                 color = PhosphorCyan,
-                style = Stroke(width = 2.2f, cap = StrokeCap.Round)
+                style = traceStroke
             )
         } else {
             // Center baseline when idle

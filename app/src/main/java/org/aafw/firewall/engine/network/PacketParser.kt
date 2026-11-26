@@ -742,9 +742,18 @@ object PacketParser {
     private fun isGreaseValue(v: Int): Boolean =
         (v and 0x0F0F) == 0x0A0A && ((v ushr 8) == (v and 0xFF))
 
+    private val HEX_UPPER = "0123456789ABCDEF".toCharArray()
+    private val HEX_LOWER = "0123456789abcdef".toCharArray()
+
     private fun md5Hex(input: String): String {
         val digest = MessageDigest.getInstance("MD5").digest(input.toByteArray(Charsets.US_ASCII))
-        return digest.joinToString("") { "%02x".format(it) }
+        val chars = CharArray(digest.size * 2)
+        for (i in digest.indices) {
+            val v = digest[i].toInt() and 0xFF
+            chars[i * 2] = HEX_LOWER[v ushr 4]
+            chars[i * 2 + 1] = HEX_LOWER[v and 0x0F]
+        }
+        return String(chars)
     }
 
     private fun formatIpv4(bytes: ByteArray): String =
@@ -797,10 +806,13 @@ object PacketParser {
 
     fun toHexPreview(buf: ByteArray, length: Int, maxBytes: Int = 96): String {
         val count = minOf(maxOf(0, length), minOf(buf.size, maxBytes))
+        if (count == 0) return ""
         val sb = StringBuilder(count * 3)
         for (i in 0 until count) {
             if (i > 0) sb.append(if (i % 16 == 0) '\n' else ' ')
-            sb.append("%02X".format(buf[i].toInt() and 0xFF))
+            val v = buf[i].toInt() and 0xFF
+            sb.append(HEX_UPPER[v ushr 4])
+            sb.append(HEX_UPPER[v and 0x0F])
         }
         return sb.toString()
     }

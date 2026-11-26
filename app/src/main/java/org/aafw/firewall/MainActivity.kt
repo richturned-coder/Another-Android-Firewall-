@@ -8,7 +8,6 @@ import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Color
-import android.graphics.PixelFormat
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
@@ -61,7 +60,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.setFormat(PixelFormat.RGBA_8888)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             window.colorMode = ActivityInfo.COLOR_MODE_DEFAULT
         }

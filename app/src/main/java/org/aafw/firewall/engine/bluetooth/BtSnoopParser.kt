@@ -204,7 +204,22 @@ object BtSnoopParser {
     }
 
     /**
-     * Streams live RFC 1761 btsnoop records over a local TCP socket (e.g., Android 17+ HCI snoop
+     * Validates that a live BTSnoop socket target points strictly to loopback (127.0.0.1 / ::1 / localhost)
+     * and uses a valid TCP port (1..65535), preventing accidental or untrusted outbound connections.
+     */
+    fun validateLocalSocketEndpoint(host: String, port: Int): String? {
+        val normalized = host.trim().lowercase()
+        if (normalized != "127.0.0.1" && normalized != "localhost" && normalized != "::1") {
+            return "Live BTSnoop socket is restricted to local loopback (127.0.0.1, ::1, or localhost)."
+        }
+        if (port !in 1..65535) {
+            return "Invalid TCP port $port (expected 1..65535)."
+        }
+        return null
+    }
+
+    /**
+     * Streams live RFC 1761 btsnoop records over a local loopback TCP socket (e.g., Android 17+ HCI snoop
      * socket or `adb forward tcp:8872 localabstract:btsnoop` / Shizuku forwarder).
      */
     suspend fun streamLiveSocket(
@@ -214,19 +229,35 @@ object BtSnoopParser {
         onFrame: (HciParsedFrame) -> Unit,
         onError: (String) -> Unit
     ) = withContext(Dispatchers.IO) {
+        val validationError = validateLocalSocketEndpoint(host, port)
+        if (validationError != null) {
+            onError(validationError)
+            return@withContext
+        }
+        val cleanHost = host.trim()
         var socket: Socket? = null
+        val cancellationHandle = coroutineContext[kotlinx.coroutines.Job]?.invokeOnCompletion {
+            runCatching { socket?.close() }
+        }
         try {
-            socket = Socket()
-            socket.connect(InetSocketAddress(host, port), 3500)
+            val resolved = java.net.InetAddress.getByName(cleanHost)
+            if (!resolved.isLoopbackAddress) {
+                onError("Refused non-loopback address for live BTSnoop socket: $cleanHost")
+                return@withContext
+            }
+            socket = Socket().apply {
+                soTimeout = 5_000
+                connect(InetSocketAddress(resolved, port), 3_500)
+            }
             val buffered = BufferedInputStream(socket.getInputStream())
-            val header = readExactBounded(buffered, 16)
+            val header = readExactBoundedWithTimeout(buffered, 16) { isActive && !socket.isClosed }
             if (header == null) {
-                onError("Peer at $host:$port closed before sending btsnoop header.")
+                if (isActive) onError("Peer at $cleanHost:$port closed before sending btsnoop header.")
                 return@withContext
             }
             for (i in 0 until 8) {
                 if (header[i] != MAGIC[i]) {
-                    onError("Connected to $host:$port, but peer did not send a btsnoop header.")
+                    onError("Connected to $cleanHost:$port, but peer did not send a btsnoop header.")
                     return@withContext
                 }
             }
@@ -234,14 +265,14 @@ object BtSnoopParser {
             val version = hdrCursor.readS32BE() ?: -1
             val datalink = hdrCursor.readS32BE() ?: -1
             if (version != 1 || datalink !in 1001..1004) {
-                onError("Unsupported btsnoop header from $host:$port (v=$version, datalink=$datalink).")
+                onError("Unsupported btsnoop header from $cleanHost:$port (v=$version, datalink=$datalink).")
                 return@withContext
             }
-            onConnected("Live btsnoop stream active ($host:$port, datalink=$datalink)")
+            onConnected("Live btsnoop stream active ($cleanHost:$port, datalink=$datalink)")
 
             var idx = 0
             while (isActive && !socket.isClosed) {
-                val recHdr = readExactBounded(buffered, 24) ?: break
+                val recHdr = readExactBoundedWithTimeout(buffered, 24) { isActive && !socket.isClosed } ?: break
                 val rc = SafeByteCursor(recHdr)
                 val origLen = rc.readS32BE() ?: break
                 val inclLen = rc.readS32BE() ?: break
@@ -249,16 +280,43 @@ object BtSnoopParser {
                 rc.readS32BE() ?: break
                 val tsMicros = rc.readS64BE() ?: break
                 if (origLen < 0 || inclLen !in 1..MAX_HCI_RECORD_BYTES) break
-                val payload = readExactBounded(buffered, inclLen) ?: break
+                val payload = readExactBoundedWithTimeout(buffered, inclLen) { isActive && !socket.isClosed } ?: break
                 idx++
-                val epochMs = ((tsMicros - BTSNOOP_EPOCH_DELTA_US) / 1000L).coerceAtLeast(System.currentTimeMillis())
+                val decodedMs = (tsMicros - BTSNOOP_EPOCH_DELTA_US) / 1000L
+                val epochMs = if (decodedMs > 0L) decodedMs else System.currentTimeMillis()
                 onFrame(decodeHciFrame(idx, epochMs, flags, datalink, payload, origLen))
             }
         } catch (e: Exception) {
-            onError("Live socket closed/unreachable ($host:$port): ${e.message ?: e.javaClass.simpleName}")
+            if (isActive) {
+                onError("Live socket closed/unreachable ($cleanHost:$port): ${e.message ?: e.javaClass.simpleName}")
+            }
         } finally {
+            cancellationHandle?.dispose()
             runCatching { socket?.close() }
         }
+    }
+
+    private fun readExactBoundedWithTimeout(
+        input: InputStream,
+        expectedLen: Int,
+        keepWaiting: () -> Boolean
+    ): ByteArray? {
+        if (expectedLen < 0 || expectedLen > MAX_HCI_RECORD_BYTES) return null
+        if (expectedLen == 0) return ByteArray(0)
+        val baos = ByteArrayOutputStream(minOf(expectedLen, READ_CHUNK_SIZE))
+        val chunk = ByteArray(minOf(expectedLen, READ_CHUNK_SIZE))
+        var remaining = expectedLen
+        while (remaining > 0 && keepWaiting()) {
+            try {
+                val n = input.read(chunk, 0, minOf(chunk.size, remaining))
+                if (n <= 0) return null
+                baos.write(chunk, 0, n)
+                remaining -= n
+            } catch (_: java.net.SocketTimeoutException) {
+                // Continue polling keepWaiting() so coroutine cancellation exits promptly
+            }
+        }
+        return if (remaining == 0) baos.toByteArray() else null
     }
 
     /**
@@ -308,9 +366,9 @@ object BtSnoopParser {
         }
 
         val cursor = SafeByteCursor(payload)
-        val firstByte = cursor.peekU8() ?: return HciParsedFrame(index, timestampMillis, direction, HciPacketLayer.RAW, "Empty HCI Frame", "", origLen, hex)
-        // Datalink 1002 = HCI UART (H4) where byte 0 is packet indicator (01=CMD, 02=ACL, 03=SCO, 04=EVT)
-        val hasH4Prefix = datalink == 1002 || (firstByte in 1..4)
+        // Datalink 1002 = HCI UART (H4) where byte 0 is the packet indicator (01=CMD, 02=ACL, 03=SCO, 04=EVT).
+        // Datalink 1001 = unencapsulated HCI (no H4 indicator; type is derived strictly from RFC 1761 flags).
+        val hasH4Prefix = datalink == 1002
         val h4Type = if (hasH4Prefix) {
             cursor.readU8() ?: 0
         } else {
@@ -474,12 +532,29 @@ object BtSnoopParser {
                     origLen, hex
                 )
             }
-            0x0006 -> HciParsedFrame(
-                index, ts, dir, HciPacketLayer.SMP,
-                "BLE Security Manager (SMP)",
-                "ACL=0x${"%03X".format(connHandle)} CID=0x0006 Len=$l2capLen",
-                origLen, hex
-            )
+            0x0006 -> {
+                val smpCode = l2Payload.readU8() ?: -1
+                val smpName = when (smpCode) {
+                    0x01 -> "SMP Pairing Request"
+                    0x02 -> "SMP Pairing Response"
+                    0x03 -> "SMP Pairing Confirm"
+                    0x04 -> "SMP Pairing Random"
+                    0x05 -> "SMP Pairing Failed"
+                    0x06 -> "SMP Encryption Information"
+                    0x07 -> "SMP Central Identification"
+                    0x08 -> "SMP Identity Information"
+                    0x0B -> "SMP Security Request"
+                    0x0C -> "SMP Pairing Public Key"
+                    0x0D -> "SMP Pairing DHKey Check"
+                    else -> "BLE Security Manager (SMP 0x${"%02X".format(smpCode and 0xFF)})"
+                }
+                HciParsedFrame(
+                    index, ts, dir, HciPacketLayer.SMP,
+                    smpName,
+                    "ACL=0x${"%03X".format(connHandle)} CID=0x0006 (SMP) Len=$l2capLen",
+                    origLen, hex
+                )
+            }
             else -> HciParsedFrame(
                 index, ts, dir, HciPacketLayer.L2CAP,
                 "L2CAP Channel 0x${"%04X".format(cid)}",

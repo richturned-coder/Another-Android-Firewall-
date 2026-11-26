@@ -1,10 +1,10 @@
 package org.aafw.firewall.vpn
 
+import android.os.SystemClock
 import org.aafw.firewall.engine.network.PcapngStats
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import java.util.ArrayDeque
 
 enum class VpnEngineState {
@@ -45,9 +45,24 @@ data class LiveTelemetryCounters(
 )
 
 class VpnTelemetryBus {
-    private val maxRingSize = 400
-    private val packetDeque = ArrayDeque<LivePacketEvent>(maxRingSize + 1)
+    companion object {
+        private const val MAX_RING_SIZE = 400
+        private const val MIN_EMIT_INTERVAL_MS = 150L
+    }
+
+    private val packetDeque = ArrayDeque<LivePacketEvent>(MAX_RING_SIZE + 1)
     private val lock = Any()
+
+    // Primitive accumulators avoid allocating a LiveTelemetryCounters + 400-item List on every packet
+    private var totalPackets = 0L
+    private var allowedPackets = 0L
+    private var blockedPackets = 0L
+    private var totalBytes = 0L
+    private var dnsQueries = 0L
+    private var tlsHandshakes = 0L
+    private var idsAlertHits = 0L
+    private var lastEmitElapsedMs = 0L
+    private var hasPendingUpdates = false
 
     private val _vpnState = MutableStateFlow(VpnEngineState.STOPPED)
     val vpnState: StateFlow<VpnEngineState> = _vpnState.asStateFlow()
@@ -74,31 +89,88 @@ class VpnTelemetryBus {
     }
 
     fun recordPacket(event: LivePacketEvent, isDns: Boolean, isTls: Boolean, newAlerts: Int) {
+        var packetSnapshot: List<LivePacketEvent>? = null
+        var counterSnapshot: LiveTelemetryCounters? = null
+
         synchronized(lock) {
-            if (packetDeque.size >= maxRingSize) {
+            if (packetDeque.size >= MAX_RING_SIZE) {
                 packetDeque.removeLast()
             }
             packetDeque.addFirst(event)
-            _recentPackets.value = packetDeque.toList()
+
+            totalPackets++
+            if (event.allowed) allowedPackets++ else blockedPackets++
+            totalBytes += event.byteLength
+            if (isDns) dnsQueries++
+            if (isTls) tlsHandshakes++
+            idsAlertHits += newAlerts
+            hasPendingUpdates = true
+
+            val now = currentMonotonicMs()
+            val urgent = !event.allowed || newAlerts > 0 || totalPackets <= 3L
+            if (urgent || now - lastEmitElapsedMs >= MIN_EMIT_INTERVAL_MS) {
+                lastEmitElapsedMs = now
+                hasPendingUpdates = false
+                packetSnapshot = ArrayList(packetDeque)
+                counterSnapshot = snapshotCountersLocked()
+            }
         }
-        _counters.update { cur ->
-            cur.copy(
-                totalPackets = cur.totalPackets + 1,
-                allowedPackets = cur.allowedPackets + if (event.allowed) 1 else 0,
-                blockedPackets = cur.blockedPackets + if (!event.allowed) 1 else 0,
-                totalBytes = cur.totalBytes + event.byteLength,
-                dnsQueries = cur.dnsQueries + if (isDns) 1 else 0,
-                tlsHandshakes = cur.tlsHandshakes + if (isTls) 1 else 0,
-                idsAlertHits = cur.idsAlertHits + newAlerts
-            )
+
+        if (packetSnapshot != null && counterSnapshot != null) {
+            _recentPackets.value = packetSnapshot
+            _counters.value = counterSnapshot
+        }
+    }
+
+    /** Flushes any throttled packet/counter snapshots to UI collectors. */
+    fun flushPending() {
+        var packetSnapshot: List<LivePacketEvent>? = null
+        var counterSnapshot: LiveTelemetryCounters? = null
+
+        synchronized(lock) {
+            if (!hasPendingUpdates) return
+            hasPendingUpdates = false
+            lastEmitElapsedMs = currentMonotonicMs()
+            packetSnapshot = ArrayList(packetDeque)
+            counterSnapshot = snapshotCountersLocked()
+        }
+
+        if (packetSnapshot != null && counterSnapshot != null) {
+            _recentPackets.value = packetSnapshot
+            _counters.value = counterSnapshot
         }
     }
 
     fun clearLiveStream() {
         synchronized(lock) {
             packetDeque.clear()
-            _recentPackets.value = emptyList()
+            totalPackets = 0L
+            allowedPackets = 0L
+            blockedPackets = 0L
+            totalBytes = 0L
+            dnsQueries = 0L
+            tlsHandshakes = 0L
+            idsAlertHits = 0L
+            hasPendingUpdates = false
+            lastEmitElapsedMs = 0L
         }
+        _recentPackets.value = emptyList()
         _counters.value = LiveTelemetryCounters()
+    }
+
+    private fun snapshotCountersLocked(): LiveTelemetryCounters = LiveTelemetryCounters(
+        totalPackets = totalPackets,
+        allowedPackets = allowedPackets,
+        blockedPackets = blockedPackets,
+        totalBytes = totalBytes,
+        dnsQueries = dnsQueries,
+        tlsHandshakes = tlsHandshakes,
+        idsAlertHits = idsAlertHits
+    )
+
+    private fun currentMonotonicMs(): Long = try {
+        SystemClock.elapsedRealtime()
+    } catch (_: Throwable) {
+        System.nanoTime() / 1_000_000L
     }
 }

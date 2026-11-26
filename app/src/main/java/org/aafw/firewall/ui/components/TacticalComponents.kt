@@ -30,7 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,6 +38,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -56,6 +57,17 @@ fun TacticalPanel(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val borderColor = accentColor?.copy(alpha = 0.45f) ?: MaterialTheme.colorScheme.outlineVariant
+    val accentBrush = remember(accentColor) {
+        accentColor?.let { color ->
+            Brush.horizontalGradient(
+                listOf(
+                    color.copy(alpha = 0.85f),
+                    color.copy(alpha = 0.15f),
+                    Color.Transparent
+                )
+            )
+        }
+    }
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium,
@@ -65,16 +77,10 @@ fun TacticalPanel(
         Column(
             modifier = Modifier
                 .then(
-                    if (accentColor != null) {
+                    if (accentBrush != null) {
                         Modifier.drawBehind {
                             drawLine(
-                                brush = Brush.horizontalGradient(
-                                    listOf(
-                                        accentColor.copy(alpha = 0.85f),
-                                        accentColor.copy(alpha = 0.15f),
-                                        Color.Transparent
-                                    )
-                                ),
+                                brush = accentBrush,
                                 start = Offset(0f, 0f),
                                 end = Offset(size.width, 0f),
                                 strokeWidth = 3f
@@ -97,9 +103,9 @@ fun PulsingStatusBadge(
     isPulsing: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val alpha = if (isPulsing) {
+    val alphaState = if (isPulsing) {
         val transition = rememberInfiniteTransition(label = "pulse_badge")
-        val animated by transition.animateFloat(
+        transition.animateFloat(
             initialValue = 0.35f,
             targetValue = 1f,
             animationSpec = infiniteRepeatable(
@@ -108,9 +114,8 @@ fun PulsingStatusBadge(
             ),
             label = "pulse_alpha"
         )
-        animated
     } else {
-        1f
+        null
     }
 
     Row(
@@ -125,8 +130,9 @@ fun PulsingStatusBadge(
         Box(
             modifier = Modifier
                 .size(7.dp)
+                .graphicsLayer { alpha = alphaState?.value ?: 1f }
                 .clip(CircleShape)
-                .background(color.copy(alpha = alpha))
+                .background(color)
         )
         Text(
             text = label,
@@ -312,7 +318,11 @@ fun formatBytesCompact(bytes: Long): String = when {
     else -> "$bytes B"
 }
 
+private val clockFormatThreadLocal = object : ThreadLocal<SimpleDateFormat>() {
+    override fun initialValue(): SimpleDateFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+}
+
 fun formatClockMillis(timestamp: Long): String {
     if (timestamp <= 0L) return "--:--:--"
-    return SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date(timestamp))
+    return clockFormatThreadLocal.get()?.format(Date(timestamp)) ?: "--:--:--"
 }

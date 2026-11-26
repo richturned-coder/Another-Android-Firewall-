@@ -35,6 +35,7 @@ class RfViewModel(
 
     private val fftEngine by lazy { Radix2FftEngine(fftSize = 1024) }
     private var streamJob: Job? = null
+    private var lastFrameEmitNs = 0L
 
     val settings: StateFlow<AppSettings> = container.preferences.settingsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppSettings())
@@ -132,6 +133,10 @@ class RfViewModel(
     }
 
     private fun processIqBlock(bytes: ByteArray, len: Int) {
+        val nowNs = System.nanoTime()
+        if (nowNs - lastFrameEmitNs < 60_000_000L) return
+        lastFrameEmitNs = nowNs
+
         val cfg = settings.value
         val bands = allocations.value
         val frame = fftEngine.processCu8Block(
@@ -148,17 +153,22 @@ class RfViewModel(
                 "Unallocated / Custom Band" to "Raw Spectral Carrier"
             }
         }
-        _uiState.update { cur ->
-            // Downsample 1024 bins -> 128 bins for fast 60fps Canvas waterfall rendering
-            val compactRow = FloatArray(128) { idx ->
-                val start = idx * 8
-                var peak = -120f
-                for (k in start until minOf(start + 8, frame.binsDb.size)) {
-                    if (frame.binsDb[k] > peak) peak = frame.binsDb[k]
-                }
-                peak
+        val compactRow = FloatArray(128) { idx ->
+            val start = idx * 8
+            var peak = -120f
+            for (k in start until minOf(start + 8, frame.binsDb.size)) {
+                if (frame.binsDb[k] > peak) peak = frame.binsDb[k]
             }
-            val nextWaterfall = (listOf(compactRow) + cur.waterfallHistory).take(48)
+            peak
+        }
+        _uiState.update { cur ->
+            val prev = cur.waterfallHistory
+            val nextSize = minOf(prev.size + 1, 48)
+            val nextWaterfall = ArrayList<FloatArray>(nextSize)
+            nextWaterfall.add(compactRow)
+            for (i in 0 until nextSize - 1) {
+                nextWaterfall.add(prev[i])
+            }
             cur.copy(
                 latestSpectrum = frame,
                 waterfallHistory = nextWaterfall

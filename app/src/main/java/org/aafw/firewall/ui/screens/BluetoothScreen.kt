@@ -50,6 +50,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -65,10 +66,14 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import org.aafw.firewall.R
 import org.aafw.firewall.engine.bluetooth.BleDeviceSighting
 import org.aafw.firewall.engine.bluetooth.BleThreatClass
+import org.aafw.firewall.engine.bluetooth.BtSnoopParser
 import org.aafw.firewall.engine.bluetooth.HciPacketLayer
 import org.aafw.firewall.engine.bluetooth.HciParsedFrame
 import org.aafw.firewall.ui.components.KeyValueRow
@@ -98,18 +103,44 @@ fun BluetoothScreen(
     var showSocketDialog by remember { mutableStateOf(false) }
     var showAdbGuide by rememberSaveable { mutableStateOf(false) }
 
-    val requiredBlePermissions = remember {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
-        } else {
-            arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshAdapterState()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // Android 12+ (API 31+): BLUETOOTH_SCAN (neverForLocation) + optional BLUETOOTH_CONNECT.
+    // Android 10-11 (API 29-30): ACCESS_FINE_LOCATION is required by OS for BLE scan results.
+    // Android 7-9 (API 24-28): ACCESS_COARSE_LOCATION suffices.
+    val requestedBlePermissions = remember {
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+                arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+            else ->
+                arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION)
+        }
+    }
+    val mandatoryScanPermission = remember {
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> Manifest.permission.BLUETOOTH_SCAN
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> Manifest.permission.ACCESS_FINE_LOCATION
+            else -> Manifest.permission.ACCESS_COARSE_LOCATION
         }
     }
 
     val blePermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        if (results.values.all { it }) {
+        val scanGranted = results[mandatoryScanPermission] == true ||
+            ContextCompat.checkSelfPermission(context, mandatoryScanPermission) == PackageManager.PERMISSION_GRANTED
+        if (scanGranted) {
             viewModel.startBleScan()
         } else {
             onShowMessage("Bluetooth scan permission denied.")
@@ -130,13 +161,14 @@ fun BluetoothScreen(
             viewModel.stopBleScan()
             return
         }
-        val allGranted = requiredBlePermissions.all {
-            ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
-        }
-        if (allGranted) {
+        val scanGranted = ContextCompat.checkSelfPermission(
+            context,
+            mandatoryScanPermission
+        ) == PackageManager.PERMISSION_GRANTED
+        if (scanGranted) {
             viewModel.startBleScan()
         } else {
-            blePermissionLauncher.launch(requiredBlePermissions)
+            blePermissionLauncher.launch(requestedBlePermissions)
         }
     }
 
@@ -497,6 +529,7 @@ fun BluetoothScreen(
     if (showSocketDialog) {
         var host by remember { mutableStateOf("127.0.0.1") }
         var port by remember { mutableStateOf("8872") }
+        var validationError by remember { mutableStateOf<String?>(null) }
         AlertDialog(
             onDismissRequest = { showSocketDialog = false },
             containerColor = MaterialTheme.colorScheme.surface,
@@ -504,18 +537,51 @@ fun BluetoothScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        text = "Connects to local ADB/Shizuku-forwarded btsnoop TCP stream (Android 17+ HCI snoop socket or `adb forward tcp:8872 localabstract:btsnoop`).",
+                        text = "Connects strictly to a local loopback ADB/Shizuku-forwarded btsnoop TCP stream (127.0.0.1 / ::1 / localhost).",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    OutlinedTextField(value = host, onValueChange = { host = it }, label = { Text("Host") }, singleLine = true)
-                    OutlinedTextField(value = port, onValueChange = { port = it }, label = { Text("Port") }, singleLine = true)
+                    OutlinedTextField(
+                        value = host,
+                        onValueChange = {
+                            host = it
+                            validationError = null
+                        },
+                        label = { Text("Loopback Host") },
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = port,
+                        onValueChange = {
+                            port = it
+                            validationError = null
+                        },
+                        label = { Text("Port (1–65535)") },
+                        singleLine = true
+                    )
+                    validationError?.let { err ->
+                        Text(
+                            text = err,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
                 }
             },
             confirmButton = {
                 Button(onClick = {
-                    val p = port.toIntOrNull() ?: 8872
-                    viewModel.connectLiveBtSnoopSocket(host.trim().ifEmpty { "127.0.0.1" }, p)
+                    val trimmedHost = host.trim().ifEmpty { "127.0.0.1" }
+                    val parsedPort = port.trim().toIntOrNull()
+                    if (parsedPort == null) {
+                        validationError = "Enter a valid numeric TCP port (1–65535)."
+                        return@Button
+                    }
+                    val err = BtSnoopParser.validateLocalSocketEndpoint(trimmedHost, parsedPort)
+                    if (err != null) {
+                        validationError = err
+                        return@Button
+                    }
+                    viewModel.connectLiveBtSnoopSocket(trimmedHost, parsedPort)
                     showSocketDialog = false
                 }) { Text("Connect") }
             },

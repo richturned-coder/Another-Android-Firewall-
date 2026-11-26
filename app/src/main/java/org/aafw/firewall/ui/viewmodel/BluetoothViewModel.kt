@@ -57,6 +57,10 @@ class BluetoothViewModel(
         container.bleMonitor.stopScanning()
     }
 
+    fun refreshAdapterState() {
+        container.bleMonitor.refreshAdapterState()
+    }
+
     fun clearBleSightings() {
         container.bleMonitor.clearSightings()
     }

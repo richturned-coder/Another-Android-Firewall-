@@ -40,6 +40,8 @@ class Radix2FftEngine(val fftSize: Int = 1024) {
         0.5 * (1.0 - cos(2.0 * PI * i / (fftSize - 1)))
     }
     private val magSq = DoubleArray(fftSize)
+    private val sortedBinsBuf = FloatArray(fftSize)
+    private val envBuf = DoubleArray(8192)
 
     fun processCu8Block(
         iqBytes: ByteArray,
@@ -106,9 +108,10 @@ class Radix2FftEngine(val fftSize: Int = 1024) {
             bins[shiftedIdx] = db
         }
 
-        val sortedBins = bins.copyOf().apply { sort() }
-        val noiseFloor = sortedBins[fftSize / 2]
-        val peakPower = sortedBins.last()
+        System.arraycopy(bins, 0, sortedBinsBuf, 0, fftSize)
+        sortedBinsBuf.sort()
+        val noiseFloor = sortedBinsBuf[fftSize / 2]
+        val peakPower = sortedBinsBuf[fftSize - 1]
 
         val ampMean = if (samplePairs > 0) ampSum / samplePairs else 0.0
         val ampVar = if (samplePairs > 0) (ampSqSum / samplePairs) - ampMean * ampMean else 0.0
@@ -200,9 +203,9 @@ class Radix2FftEngine(val fftSize: Int = 1024) {
     }
 
     private fun detectOokBursts(iqBytes: ByteArray, byteLength: Int, sampleRateHz: Int): String? {
-        val pairs = minOf(byteLength / 2, 8192)
+        val pairs = minOf(byteLength / 2, envBuf.size)
         if (pairs < 256) return null
-        val env = DoubleArray(pairs)
+        val env = envBuf
         var maxEnv = 0.0
         var sumEnv = 0.0
         for (i in 0 until pairs) {

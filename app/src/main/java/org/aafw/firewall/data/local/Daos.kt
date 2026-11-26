@@ -23,6 +23,9 @@ interface FirewallRuleDao {
     @Query("UPDATE firewall_rules SET hitCount = hitCount + 1 WHERE ruleType = :ruleType AND targetValue = :targetValue")
     suspend fun incrementHitCount(ruleType: String, targetValue: String)
 
+    @Query("UPDATE firewall_rules SET hitCount = hitCount + :delta WHERE ruleType = :ruleType AND targetValue = :targetValue")
+    suspend fun incrementHitCountBy(ruleType: String, targetValue: String, delta: Long)
+
     @Query("DELETE FROM firewall_rules WHERE id = :id")
     suspend fun deleteRuleById(id: Long)
 

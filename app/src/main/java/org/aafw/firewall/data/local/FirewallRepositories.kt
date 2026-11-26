@@ -38,6 +38,10 @@ class FirewallRepository(
     suspend fun incrementRuleHit(ruleType: RuleType, targetValue: String) =
         ruleDao.incrementHitCount(ruleType.name, targetValue)
 
+    suspend fun incrementRuleHitBy(ruleType: RuleType, targetValue: String, delta: Long) {
+        if (delta > 0L) ruleDao.incrementHitCountBy(ruleType.name, targetValue, delta)
+    }
+
     suspend fun insertAlert(alert: IdsAlertEntity): Long = alertDao.insertAlert(alert)
 
     suspend fun clearAlerts() = alertDao.clearAllAlerts()

@@ -18,6 +18,7 @@ import org.aafw.firewall.FirewallApplication
 import org.aafw.firewall.MainActivity
 import org.aafw.firewall.R
 import org.aafw.firewall.data.local.CaptureSessionEntity
+import org.aafw.firewall.data.local.RuleType
 import org.aafw.firewall.engine.network.AppLabelResolver
 import org.aafw.firewall.engine.network.IdsConfig
 import org.aafw.firewall.engine.network.PacketParser
@@ -71,6 +72,7 @@ class FirewallVpnService : VpnService() {
     private val secureRandom = SecureRandom()
     private val packetIdGen = AtomicLong(1L)
     private val uidLabelCache = ConcurrentHashMap<Int, String>()
+    private val pendingRuleHits = ConcurrentHashMap<Pair<RuleType, String>, AtomicLong>()
     private val udpSessions = ConcurrentHashMap<String, UdpRelaySession>()
     private val tcpSessions = ConcurrentHashMap<String, TcpRelaySession>()
     private val tunWriteLock = Any()
@@ -279,14 +281,8 @@ class FirewallVpnService : VpnService() {
                 val verdictLabel = if (verdict.allowed) "ALLOW" else "BLOCK"
 
                 if (verdict.matchedRuleType != null && verdict.matchedTarget != null) {
-                    serviceScope.launch {
-                        runCatching {
-                            appContainer.repository.incrementRuleHit(
-                                verdict.matchedRuleType,
-                                verdict.matchedTarget
-                            )
-                        }
-                    }
+                    val key = verdict.matchedRuleType to verdict.matchedTarget
+                    pendingRuleHits.computeIfAbsent(key) { AtomicLong(0L) }.incrementAndGet()
                 }
 
                 // 2. Simultaneous PCAPNG Tee (lock-free bounded ring buffer)
@@ -456,14 +452,12 @@ class FirewallVpnService : VpnService() {
                         break
                     }
                     if (len <= 0) break
-                    val respBytes = ByteArray(len)
-                    System.arraycopy(respBuf.array(), 0, respBytes, 0, len)
                     val ipResp = PacketParser.buildIpv4UdpResponse(
                         srcIp = remoteIpCopy,
                         dstIp = clientIpCopy,
                         srcPort = packet.dstPort,
                         dstPort = packet.srcPort,
-                        payload = respBytes,
+                        payload = respBuf.array(),
                         payloadLen = len
                     )
                     pcapngWriter.offerPacket(ipResp, ipResp.size, appUid, appLabel, "ALLOW_RX", packet.domainOrSni)
@@ -623,8 +617,6 @@ class FirewallVpnService : VpnService() {
                         break
                     }
                     if (n == 0) continue
-                    val chunk = ByteArray(n)
-                    System.arraycopy(readBuf.array(), 0, chunk, 0, n)
                     val dataPkt = PacketParser.buildIpv4TcpPacket(
                         srcIp = session.remoteIp,
                         dstIp = session.clientIp,
@@ -633,7 +625,7 @@ class FirewallVpnService : VpnService() {
                         seq = session.serverSeq,
                         ack = session.clientNextSeq,
                         flags = 0x18, // PSH + ACK
-                        payload = chunk,
+                        payload = readBuf.array(),
                         payloadLen = n
                     )
                     session.serverSeq = (session.serverSeq + n.toLong()) and 0xFFFFFFFFL
@@ -681,14 +673,37 @@ class FirewallVpnService : VpnService() {
     private fun startSessionCleanupLoop() {
         cleanupJob?.cancel()
         cleanupJob = serviceScope.launch(Dispatchers.IO) {
+            var ticks = 0
             while (isActive) {
-                delay(15_000L)
-                val now = System.currentTimeMillis()
-                udpSessions.entries.forEach { (key, sess) ->
-                    if (now - sess.lastActiveAt > 45_000L) closeUdpSession(key)
+                delay(250L)
+                ticks++
+                appContainer.telemetryBus.flushPending()
+
+                if (ticks % 8 == 0) { // Every ~2 seconds
+                    flushPendingRuleHits()
                 }
-                tcpSessions.entries.forEach { (key, sess) ->
-                    if (now - sess.lastActiveAt > 90_000L) closeTcpSession(key)
+                if (ticks % 60 == 0) { // Every ~15 seconds
+                    val now = System.currentTimeMillis()
+                    udpSessions.entries.forEach { (key, sess) ->
+                        if (now - sess.lastActiveAt > 45_000L) closeUdpSession(key)
+                    }
+                    tcpSessions.entries.forEach { (key, sess) ->
+                        if (now - sess.lastActiveAt > 90_000L) closeTcpSession(key)
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun flushPendingRuleHits() {
+        if (pendingRuleHits.isEmpty()) return
+        val keys = pendingRuleHits.keys.toList()
+        for (key in keys) {
+            val counter = pendingRuleHits[key] ?: continue
+            val delta = counter.getAndSet(0L)
+            if (delta > 0L) {
+                runCatching {
+                    appContainer.repository.incrementRuleHitBy(key.first, key.second, delta)
                 }
             }
         }
@@ -771,8 +786,11 @@ class FirewallVpnService : VpnService() {
         cleanupJob?.cancel()
         observerJob?.cancel()
 
+        appContainer.telemetryBus.flushPending()
+
         serviceScope.launch {
             try {
+                flushPendingRuleHits()
                 stopPcapRecording()
             } finally {
                 if (cancelScopeAfterFlush) {
