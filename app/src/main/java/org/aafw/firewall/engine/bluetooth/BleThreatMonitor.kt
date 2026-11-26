@@ -18,12 +18,26 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import org.aafw.firewall.engine.SafeByteCursor
 import java.util.ArrayDeque
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
 data class BleAdStructure(
     val adType: Int,
     val data: ByteArray
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as BleAdStructure
+        return adType == other.adType && data.contentEquals(other.data)
+    }
+
+    override fun hashCode(): Int {
+        var result = adType
+        result = 31 * result + data.contentHashCode()
+        return result
+    }
+}
 
 /**
  * Zero-crash, O(n) BLE Advertising Data (AD) TLV parser.
@@ -151,13 +165,13 @@ class BleThreatMonitor(private val context: Context) {
                     0x07, 0x0F -> BleAdvertisingClassification(
                         "Apple Continuity Pop-up",
                         BleThreatClass.NORMAL,
-                        "Proximity Pairing / Nearby Action frame (0x004C type 0x${"%02X".format(subType)})",
+                        "Proximity Pairing / Nearby Action frame (0x004C type 0x${String.format(Locale.US, "%02X", subType)})",
                         true
                     )
                     else -> BleAdvertisingClassification(
                         "Apple BLE (0x004C)",
                         BleThreatClass.NORMAL,
-                        "Continuity frame type 0x${"%02X".format(subType)}",
+                        "Continuity frame type 0x${String.format(Locale.US, "%02X", subType)}",
                         false
                     )
                 }
@@ -410,7 +424,7 @@ class BleThreatMonitor(private val context: Context) {
                 context,
                 adapterStateReceiver,
                 IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
-                ContextCompat.RECEIVER_EXPORTED
+                ContextCompat.RECEIVER_NOT_EXPORTED
             )
             adapterReceiverRegistered = true
         }
@@ -467,7 +481,7 @@ class BleThreatMonitor(private val context: Context) {
                 firstSeenAt = firstSeen,
                 lastSeenAt = now,
                 packetCount = count,
-                rawAdvHex = rawBytes.take(31).joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
+                rawAdvHex = rawBytes.take(31).joinToString(" ") { String.format(Locale.US, "%02X", it.toInt() and 0xFF) }
             )
 
             sightings[address] = updated
@@ -559,7 +573,7 @@ class BleThreatMonitor(private val context: Context) {
         // Check Service Data (0x16) and raw AD TLV structures via hardened BleAdParser
         classifyRawAdPayload(rawBytes)?.let { return it }
 
-        val hexStr = rawBytes.take(12).joinToString("") { "%02X".format(it.toInt() and 0xFF) }
+        val hexStr = rawBytes.take(12).joinToString("") { String.format(Locale.US, "%02X", it.toInt() and 0xFF) }
         return BleAdvertisingClassification(
             vendorTag = if (hexStr.isNotEmpty()) "BLE Device" else "Unknown BLE",
             threatClass = BleThreatClass.NORMAL,

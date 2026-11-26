@@ -27,7 +27,33 @@ data class SpectrumFrame(
     val peakPowerDb: Float,
     val peaks: List<DetectedRfPeak>,
     val ookPulseSummary: String?
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as SpectrumFrame
+        return timestamp == other.timestamp &&
+            centerFreqMhz == other.centerFreqMhz &&
+            sampleRateHz == other.sampleRateHz &&
+            binsDb.contentEquals(other.binsDb) &&
+            noiseFloorDb == other.noiseFloorDb &&
+            peakPowerDb == other.peakPowerDb &&
+            peaks == other.peaks &&
+            ookPulseSummary == other.ookPulseSummary
+    }
+
+    override fun hashCode(): Int {
+        var result = timestamp.hashCode()
+        result = 31 * result + centerFreqMhz.hashCode()
+        result = 31 * result + sampleRateHz
+        result = 31 * result + binsDb.contentHashCode()
+        result = 31 * result + noiseFloorDb.hashCode()
+        result = 31 * result + peakPowerDb.hashCode()
+        result = 31 * result + peaks.hashCode()
+        result = 31 * result + (ookPulseSummary?.hashCode() ?: 0)
+        return result
+    }
+}
 
 /**
  * Pure-Kotlin zero-dependency in-place Radix-2 Cooley-Tukey FFT, noise-floor median estimator,
@@ -123,7 +149,6 @@ class Radix2FftEngine(val fftSize: Int = 1024) {
             noiseFloor = noiseFloor,
             thresholdDb = peakThresholdDb,
             centerFreqMhz = centerFreqMhz,
-            sampleRateHz = sampleRateHz,
             binWidthHz = binWidthHz,
             ampVar = ampVar,
             phaseVar = phaseVar,
@@ -147,7 +172,6 @@ class Radix2FftEngine(val fftSize: Int = 1024) {
         noiseFloor: Float,
         thresholdDb: Float,
         centerFreqMhz: Double,
-        sampleRateHz: Int,
         binWidthHz: Double,
         ampVar: Double,
         phaseVar: Double,

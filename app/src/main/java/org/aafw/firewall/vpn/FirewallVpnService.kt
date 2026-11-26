@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.VpnService
@@ -87,7 +88,7 @@ class FirewallVpnService : VpnService() {
 
     private val appContainer by lazy { (application as FirewallApplication).container }
 
-    private data class UdpRelaySession(
+    private class UdpRelaySession(
         val key: String,
         val channel: DatagramChannel,
         val clientIp: ByteArray,
@@ -100,7 +101,7 @@ class FirewallVpnService : VpnService() {
         val readerJob: Job
     )
 
-    private data class TcpRelaySession(
+    private class TcpRelaySession(
         val key: String,
         val channel: SocketChannel,
         val clientIp: ByteArray,
@@ -397,7 +398,17 @@ class FirewallVpnService : VpnService() {
                     val pkgs = runCatching { packageManager.getPackagesForUid(uid) }.getOrNull()
                     val pkg = pkgs?.firstOrNull()
                     if (pkg != null) {
-                        val ai = runCatching { packageManager.getApplicationInfo(pkg, 0) }.getOrNull()
+                        val ai = runCatching {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                packageManager.getApplicationInfo(
+                                    pkg,
+                                    PackageManager.ApplicationInfoFlags.of(0)
+                                )
+                            } else {
+                                @Suppress("DEPRECATION")
+                                packageManager.getApplicationInfo(pkg, 0)
+                            }
+                        }.getOrNull()
                         AppLabelResolver.resolve(null, ai)
                             .takeIf { ai != null } ?: AppLabelResolver.resolveFromPackageName(pkg)
                     } else {

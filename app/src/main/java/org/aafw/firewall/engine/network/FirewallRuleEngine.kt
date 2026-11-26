@@ -13,7 +13,7 @@ data class FirewallVerdict(
     val reason: String
 )
 
-private data class CidrRule(
+private class CidrRule(
     val rawTarget: String,
     val networkBytes: ByteArray,
     val prefixLength: Int,

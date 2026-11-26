@@ -13,6 +13,7 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.Locale
 import java.util.zip.ZipInputStream
 
 enum class HciPacketLayer(val label: String) {
@@ -359,7 +360,7 @@ object BtSnoopParser {
     ): HciParsedFrame {
         val isReceived = (flags and 0x01) != 0
         val direction = if (isReceived) "RX" else "TX"
-        val hex = payload.take(48).joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
+        val hex = payload.take(48).joinToString(" ") { String.format(Locale.US, "%02X", it.toInt() and 0xFF) }
 
         if (payload.isEmpty()) {
             return HciParsedFrame(index, timestampMillis, direction, HciPacketLayer.RAW, "Empty HCI Frame", "", origLen, hex)
@@ -390,7 +391,7 @@ object BtSnoopParser {
             )
             else -> HciParsedFrame(
                 index, timestampMillis, direction, HciPacketLayer.RAW,
-                "HCI Raw Packet (type=0x${"%02X".format(h4Type)})", "Length=$origLen bytes", origLen, hex
+                "HCI Raw Packet (type=0x${String.format(Locale.US, "%02X", h4Type)})", "Length=$origLen bytes", origLen, hex
             )
         }
     }
@@ -417,12 +418,12 @@ object BtSnoopParser {
             0x2006 -> "LE_Set_Advertising_Parameters"
             0x200A -> "LE_Set_Advertise_Enable"
             0x0406 -> "HCI_Disconnect"
-            else -> "HCI_Cmd 0x${"%04X".format(opcode)}"
+            else -> "HCI_Cmd 0x${String.format(Locale.US, "%04X", opcode)}"
         }
         return HciParsedFrame(
             index, ts, dir, HciPacketLayer.HCI_CMD,
             name,
-            "OGF=0x${"%02X".format(ogf)} OCF=0x${"%03X".format(ocf)} ParamLen=$paramLen",
+            "OGF=0x${String.format(Locale.US, "%02X", ogf)} OCF=0x${String.format(Locale.US, "%03X", ocf)} ParamLen=$paramLen",
             origLen, hex
         )
     }
@@ -459,15 +460,15 @@ object BtSnoopParser {
                         "LE Advertising Report"
                     }
                     0x0D -> "LE Extended Advertising Report"
-                    else -> "LE Meta Event (sub=0x${"%02X".format(sub and 0xFF)})"
+                    else -> "LE Meta Event (sub=0x${String.format(Locale.US, "%02X", sub and 0xFF)})"
                 }
             }
-            else -> "HCI Event 0x${"%02X".format(evtCode)}"
+            else -> "HCI Event 0x${String.format(Locale.US, "%02X", evtCode)}"
         }
         return HciParsedFrame(
             index, ts, dir, HciPacketLayer.HCI_EVT,
             eventName,
-            "Event=0x${"%02X".format(evtCode)} ParamLen=$paramLen$extraDetail",
+            "Event=0x${String.format(Locale.US, "%02X", evtCode)} ParamLen=$paramLen$extraDetail",
             origLen, hex
         )
     }
@@ -522,13 +523,13 @@ object BtSnoopParser {
                     0x1B -> "GATT Handle Value Notification"
                     0x1D -> "GATT Handle Value Indication"
                     0x52 -> "GATT Write Command"
-                    else -> "ATT Opcode 0x${"%02X".format(attOpcode and 0xFF)}"
+                    else -> "ATT Opcode 0x${String.format(Locale.US, "%02X", attOpcode and 0xFF)}"
                 }
-                val handleStr = attHandle?.let { " Handle=0x${"%04X".format(it)}" } ?: ""
+                val handleStr = attHandle?.let { " Handle=0x${String.format(Locale.US, "%04X", it)}" } ?: ""
                 HciParsedFrame(
                     index, ts, dir, HciPacketLayer.ATT_GATT,
                     opName,
-                    "ACL=0x${"%03X".format(connHandle)} CID=0x0004 (ATT) Len=$l2capLen$handleStr",
+                    "ACL=0x${String.format(Locale.US, "%03X", connHandle)} CID=0x0004 (ATT) Len=$l2capLen$handleStr",
                     origLen, hex
                 )
             }
@@ -546,19 +547,19 @@ object BtSnoopParser {
                     0x0B -> "SMP Security Request"
                     0x0C -> "SMP Pairing Public Key"
                     0x0D -> "SMP Pairing DHKey Check"
-                    else -> "BLE Security Manager (SMP 0x${"%02X".format(smpCode and 0xFF)})"
+                    else -> "BLE Security Manager (SMP 0x${String.format(Locale.US, "%02X", smpCode and 0xFF)})"
                 }
                 HciParsedFrame(
                     index, ts, dir, HciPacketLayer.SMP,
                     smpName,
-                    "ACL=0x${"%03X".format(connHandle)} CID=0x0006 (SMP) Len=$l2capLen",
+                    "ACL=0x${String.format(Locale.US, "%03X", connHandle)} CID=0x0006 (SMP) Len=$l2capLen",
                     origLen, hex
                 )
             }
             else -> HciParsedFrame(
                 index, ts, dir, HciPacketLayer.L2CAP,
-                "L2CAP Channel 0x${"%04X".format(cid)}",
-                "ACL=0x${"%03X".format(connHandle)} L2CAP_Len=$l2capLen",
+                "L2CAP Channel 0x${String.format(Locale.US, "%04X", cid)}",
+                "ACL=0x${String.format(Locale.US, "%03X", connHandle)} L2CAP_Len=$l2capLen",
                 origLen, hex
             )
         }

@@ -63,6 +63,54 @@ data class ParsedPacket(
     val isTcpFin: Boolean get() = protocol == TransportProtocol.TCP && (tcpFlags and 0x01) != 0
     val isTcpRst: Boolean get() = protocol == TransportProtocol.TCP && (tcpFlags and 0x04) != 0
     val domainOrSni: String? get() = dnsQueryDomain ?: tlsInfo?.sniHost ?: httpInfo?.hostHeader
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as ParsedPacket
+        return ipVersion == other.ipVersion &&
+            headerLength == other.headerLength &&
+            totalLength == other.totalLength &&
+            protocol == other.protocol &&
+            srcIp == other.srcIp &&
+            dstIp == other.dstIp &&
+            srcIpBytes.contentEquals(other.srcIpBytes) &&
+            dstIpBytes.contentEquals(other.dstIpBytes) &&
+            srcPort == other.srcPort &&
+            dstPort == other.dstPort &&
+            tcpFlags == other.tcpFlags &&
+            tcpSeq == other.tcpSeq &&
+            tcpAck == other.tcpAck &&
+            payloadOffset == other.payloadOffset &&
+            payloadLength == other.payloadLength &&
+            dnsQueryDomain == other.dnsQueryDomain &&
+            tlsInfo == other.tlsInfo &&
+            httpInfo == other.httpInfo &&
+            isMalformed == other.isMalformed
+    }
+
+    override fun hashCode(): Int {
+        var result = ipVersion
+        result = 31 * result + headerLength
+        result = 31 * result + totalLength
+        result = 31 * result + protocol.hashCode()
+        result = 31 * result + srcIp.hashCode()
+        result = 31 * result + dstIp.hashCode()
+        result = 31 * result + srcIpBytes.contentHashCode()
+        result = 31 * result + dstIpBytes.contentHashCode()
+        result = 31 * result + srcPort
+        result = 31 * result + dstPort
+        result = 31 * result + tcpFlags
+        result = 31 * result + tcpSeq.hashCode()
+        result = 31 * result + tcpAck.hashCode()
+        result = 31 * result + payloadOffset
+        result = 31 * result + payloadLength
+        result = 31 * result + (dnsQueryDomain?.hashCode() ?: 0)
+        result = 31 * result + (tlsInfo?.hashCode() ?: 0)
+        result = 31 * result + (httpInfo?.hashCode() ?: 0)
+        result = 31 * result + isMalformed.hashCode()
+        return result
+    }
 }
 
 /**

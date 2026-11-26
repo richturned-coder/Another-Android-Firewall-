@@ -6,6 +6,7 @@ import org.aafw.firewall.data.local.AlertSeverity
 import org.aafw.firewall.data.local.IdsAlertEntity
 import java.net.URLDecoder
 import java.util.ArrayDeque
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.ln
 
@@ -399,7 +400,7 @@ class IdsEngine {
                     category = AlertCategory.DGA_ENTROPY.name,
                     ruleId = "IDS-HEUR-DGA",
                     title = "High-Entropy / Possible DGA or DNS Tunnel",
-                    description = "Label '${longestLabel.take(24)}...' has Shannon entropy ${"%.2f".format(entropy)} bits (len=${longestLabel.length}).",
+                    description = "Label '${longestLabel.take(24)}...' has Shannon entropy ${String.format(Locale.US, "%.2f", entropy)} bits (len=${longestLabel.length}).",
                     appUid = appUid,
                     appLabel = appLabel,
                     protocol = packet.protocol.label,

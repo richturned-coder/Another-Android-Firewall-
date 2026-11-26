@@ -17,6 +17,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import org.aafw.firewall.BuildConfig
 import java.io.BufferedInputStream
+import java.util.Locale
 
 data class DetectedUsbHardware(
     val deviceName: String,
@@ -61,7 +62,7 @@ class RtlSdrUsbManager(private val context: Context) {
                 deviceName = dev.deviceName,
                 vendorId = dev.vendorId,
                 productId = dev.productId,
-                modelLabel = sdrLabel ?: irLabel ?: (dev.productName ?: "USB Device ${"%04X:%04X".format(dev.vendorId, dev.productId)}"),
+                modelLabel = sdrLabel ?: irLabel ?: (dev.productName ?: "USB Device ${String.format(Locale.US, "%04X:%04X", dev.vendorId, dev.productId)}"),
                 isSupportedSdr = sdrLabel != null,
                 isIrSerialBridge = irLabel != null,
                 hasPermission = mgr.hasPermission(dev),
@@ -73,9 +74,9 @@ class RtlSdrUsbManager(private val context: Context) {
     fun requestUsbPermission(device: UsbDevice) {
         val mgr = usbManager ?: return
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            PendingIntent.FLAG_MUTABLE
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
         } else {
-            0
+            PendingIntent.FLAG_UPDATE_CURRENT
         }
         val permissionIntent = Intent(ACTION_USB_PERMISSION).setPackage(context.packageName)
         val pi = PendingIntent.getBroadcast(context, 0, permissionIntent, flags)

@@ -313,8 +313,8 @@ fun KeyValueRow(label: String, value: String, valueColor: Color = MaterialTheme.
 }
 
 fun formatBytesCompact(bytes: Long): String = when {
-    bytes >= 1_048_576L -> "%.2f MB".format(bytes / 1_048_576.0)
-    bytes >= 1024L -> "%.1f KB".format(bytes / 1024.0)
+    bytes >= 1_048_576L -> String.format(Locale.US, "%.2f MB", bytes / 1_048_576.0)
+    bytes >= 1024L -> String.format(Locale.US, "%.1f KB", bytes / 1024.0)
     else -> "$bytes B"
 }
 

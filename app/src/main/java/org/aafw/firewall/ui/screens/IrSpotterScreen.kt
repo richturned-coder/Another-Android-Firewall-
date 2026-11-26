@@ -74,6 +74,7 @@ import org.aafw.firewall.ui.theme.PhosphorCyan
 import org.aafw.firewall.ui.theme.TacticalAmber
 import org.aafw.firewall.ui.theme.TelemetryMonoSmall
 import org.aafw.firewall.ui.viewmodel.IrViewModel
+import java.util.Locale
 import java.util.concurrent.Executors
 
 @Composable
@@ -273,7 +274,7 @@ fun IrSpotterScreen(
                     )
 
                     Text(
-                        text = "Violet/Magenta Chroma Sensitivity: ${"%.2f".format(settings.irChromaBiasThreshold)}",
+                        text = "Violet/Magenta Chroma Sensitivity: ${String.format(Locale.US, "%.2f", settings.irChromaBiasThreshold)}",
                         style = TelemetryMonoSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

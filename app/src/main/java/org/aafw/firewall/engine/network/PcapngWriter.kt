@@ -18,7 +18,23 @@ data class PcapngFrame(
     val timestampMicros: Long,
     val rawBytes: ByteArray,
     val comment: String
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as PcapngFrame
+        return timestampMicros == other.timestampMicros &&
+            rawBytes.contentEquals(other.rawBytes) &&
+            comment == other.comment
+    }
+
+    override fun hashCode(): Int {
+        var result = timestampMicros.hashCode()
+        result = 31 * result + rawBytes.contentHashCode()
+        result = 31 * result + comment.hashCode()
+        return result
+    }
+}
 
 data class PcapngStats(
     val isRecording: Boolean = false,

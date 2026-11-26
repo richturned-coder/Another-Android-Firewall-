@@ -75,6 +75,7 @@ import org.aafw.firewall.ui.theme.TelemetryMonoLarge
 import org.aafw.firewall.ui.theme.TelemetryMonoMedium
 import org.aafw.firewall.ui.theme.TelemetryMonoSmall
 import org.aafw.firewall.ui.viewmodel.RfViewModel
+import java.util.Locale
 
 private val rfPresets = listOf(
     "315 ISM" to 315.0,
@@ -128,7 +129,7 @@ fun RfSpectrumScreen(
                             color = MaterialTheme.colorScheme.primary
                         )
                         Text(
-                            text = "${"%.3f".format(settings.rfCenterFreqMhz)} MHz",
+                            text = "${String.format(Locale.US, "%.3f", settings.rfCenterFreqMhz)} MHz",
                             style = TelemetryMonoLarge,
                             color = MaterialTheme.colorScheme.onSurface
                         )
@@ -228,7 +229,7 @@ fun RfSpectrumScreen(
                         color = MaterialTheme.colorScheme.primary
                     )
                     Text(
-                        text = "Span: ${"%.2f".format(settings.rfSampleRateHz / 1_000_000.0)} MHz",
+                        text = "Span: ${String.format(Locale.US, "%.2f", settings.rfSampleRateHz / 1_000_000.0)} MHz",
                         style = TelemetryMonoSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -251,13 +252,13 @@ fun RfSpectrumScreen(
                 ) {
                     MetricTile(
                         label = "Noise Floor",
-                        value = spectrum?.let { "${"%.1f".format(it.noiseFloorDb)} dB" } ?: "-- dB",
+                        value = spectrum?.let { "${String.format(Locale.US, "%.1f", it.noiseFloorDb)} dB" } ?: "-- dB",
                         accent = MaterialTheme.colorScheme.secondary,
                         modifier = Modifier.weight(1f)
                     )
                     MetricTile(
                         label = "Peak Power",
-                        value = spectrum?.let { "${"%.1f".format(it.peakPowerDb)} dB" } ?: "-- dB",
+                        value = spectrum?.let { "${String.format(Locale.US, "%.1f", it.peakPowerDb)} dB" } ?: "-- dB",
                         accent = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.weight(1f)
                     )
@@ -271,7 +272,7 @@ fun RfSpectrumScreen(
 
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    text = "Peak SNR Detection Threshold: +${"%.0f".format(settings.rfPeakThresholdDb)} dB above floor",
+                    text = "Peak SNR Detection Threshold: +${String.format(Locale.US, "%.0f", settings.rfPeakThresholdDb)} dB above floor",
                     style = TelemetryMonoSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -501,7 +502,7 @@ private fun UsbHardwareCard(
             Column(modifier = Modifier.weight(1f)) {
                 Text(text = hw.modelLabel, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
                 Text(
-                    text = "VID:PID ${"%04X:%04X".format(hw.vendorId, hw.productId)} • ${hw.deviceName}",
+                    text = "VID:PID ${String.format(Locale.US, "%04X:%04X", hw.vendorId, hw.productId)} • ${hw.deviceName}",
                     style = TelemetryMonoSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -531,13 +532,13 @@ private fun DetectedPeakCard(peak: DetectedRfPeak) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Icon(Icons.Default.GraphicEq, contentDescription = null, tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(18.dp))
                 Text(
-                    text = "${"%.4f".format(peak.frequencyMhz)} MHz",
+                    text = "${String.format(Locale.US, "%.4f", peak.frequencyMhz)} MHz",
                     style = TelemetryMonoMedium,
                     color = MaterialTheme.colorScheme.primary
                 )
             }
             Text(
-                text = "SNR +${"%.1f".format(peak.snrDb)} dB • BW ${"%.1f".format(peak.bandwidthKhz)} kHz",
+                text = "SNR +${String.format(Locale.US, "%.1f", peak.snrDb)} dB • BW ${String.format(Locale.US, "%.1f", peak.bandwidthKhz)} kHz",
                 style = TelemetryMonoSmall,
                 color = MaterialTheme.colorScheme.secondary
             )
